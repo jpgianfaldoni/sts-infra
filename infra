@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./infra list
+  ./infra auth <aws|azure> <environment.tfvars>
+  ./infra validate <aws|azure>
+  ./infra plan <aws|azure> <environment.tfvars>
+  ./infra apply <aws|azure> <environment.tfvars>
+  ./infra output <aws|azure>
+  ./infra destroy-plan <aws|azure> <environment.tfvars>
+  ./infra destroy <aws|azure> <environment.tfvars> --confirm destroy-<cloud>
+  ./infra endpoints aws status
+  ./infra endpoints aws accept --service-id vpce-svc-... --endpoint-id vpce-...
+EOF
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+cloud_root() {
+  case "$1" in
+    aws|azure) printf '%s/deployments/%s' "$ROOT" "$1" ;;
+    *) die "cloud must be aws or azure" ;;
+  esac
+}
+
+tfvar_string() {
+  local file="$1" key="$2"
+  awk -F= -v key="$key" '$1 ~ "^[[:space:]]*" key "[[:space:]]*$" { value=$2; gsub(/[[:space:]\"]/, "", value); print value; exit }' "$file"
+}
+
+auth() {
+  local cloud="$1" vars="$2"
+  [[ -f "$vars" ]] || die "tfvars file not found: $vars"
+  if [[ "$cloud" == "aws" ]]; then
+    local aws_profile db_profile db_workspace_profile
+    aws_profile="$(tfvar_string "$vars" aws_profile)"
+    db_profile="$(tfvar_string "$vars" databricks_profile)"
+    db_workspace_profile="$(tfvar_string "$vars" databricks_workspace_profile)"
+    [[ -n "$aws_profile" ]] || aws_profile="${AWS_PROFILE:-default}"
+    [[ -n "$db_profile" ]] || db_profile="DEFAULT"
+    aws sts get-caller-identity --profile "$aws_profile" >/dev/null || die "AWS session unavailable. Run: aws sso login --profile $aws_profile"
+    databricks account workspaces list --profile "$db_profile" --output json >/dev/null || die "Databricks account session unavailable. Run: databricks auth login --host https://accounts.cloud.databricks.com --profile $db_profile"
+    if [[ -n "$db_workspace_profile" ]]; then
+      databricks current-user me --profile "$db_workspace_profile" --output json >/dev/null || die "Databricks workspace session unavailable. Run: databricks auth login --profile $db_workspace_profile"
+    fi
+    echo "AWS and Databricks profile preflight passed."
+  else
+    local subscription
+    subscription="$(tfvar_string "$vars" subscription_id)"
+    az account show >/dev/null || die "Azure session unavailable. Run: az login"
+    [[ -n "$subscription" ]] || die "subscription_id is required in $vars"
+    az account set --subscription "$subscription"
+    echo "Azure authentication preflight passed."
+  fi
+}
+
+command="${1:-}"
+case "$command" in
+  list)
+    jq . "$ROOT/components.json"
+    ;;
+  auth)
+    [[ $# -eq 3 ]] || { usage; exit 2; }
+    auth "$2" "$3"
+    ;;
+  validate)
+    [[ $# -eq 2 ]] || { usage; exit 2; }
+    "$ROOT/scripts/validate.sh" "$2"
+    ;;
+  plan)
+    [[ $# -eq 3 ]] || { usage; exit 2; }
+    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"
+    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
+    auth "$cloud" "$vars"
+    mkdir -p "$ROOT/.artifacts/$cloud"
+    plan="$ROOT/.artifacts/$cloud/terraform.tfplan"
+    terraform -chdir="$dir" init
+    terraform -chdir="$dir" plan -var-file="$vars" -out="$plan"
+    shasum -a 256 "$vars" | awk '{print $1}' > "$plan.tfvars.sha256"
+    printf '%s\n' "$vars" > "$plan.tfvars.path"
+    echo "Saved plan: $plan"
+    ;;
+  apply)
+    [[ $# -eq 3 ]] || { usage; exit 2; }
+    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"; plan="$ROOT/.artifacts/$cloud/terraform.tfplan"
+    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
+    [[ -f "$plan" && -f "$plan.tfvars.sha256" ]] || die "no saved plan; run ./infra plan first"
+    expected="$(cat "$plan.tfvars.sha256")"; actual="$(shasum -a 256 "$vars" | awk '{print $1}')"
+    [[ "$actual" == "$expected" ]] || die "tfvars changed after the saved plan; create a new plan"
+    auth "$cloud" "$vars"
+    terraform -chdir="$dir" apply "$plan"
+    ;;
+  output)
+    [[ $# -eq 2 ]] || { usage; exit 2; }
+    terraform -chdir="$(cloud_root "$2")" output
+    ;;
+  destroy-plan)
+    [[ $# -eq 3 ]] || { usage; exit 2; }
+    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"
+    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
+    auth "$cloud" "$vars"
+    mkdir -p "$ROOT/.artifacts/$cloud"
+    plan="$ROOT/.artifacts/$cloud/destroy.tfplan"
+    terraform -chdir="$dir" init
+    terraform -chdir="$dir" plan -destroy -var-file="$vars" -out="$plan"
+    shasum -a 256 "$vars" | awk '{print $1}' > "$plan.tfvars.sha256"
+    printf '%s\n' "$vars" > "$plan.tfvars.path"
+    echo "Saved destroy plan: $plan"
+    ;;
+  destroy)
+    [[ $# -eq 5 && "$4" == "--confirm" && "$5" == "destroy-$2" ]] || die "destroy requires: --confirm destroy-<cloud>"
+    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"; plan="$ROOT/.artifacts/$cloud/destroy.tfplan"
+    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
+    [[ -f "$plan" && -f "$plan.tfvars.sha256" && -f "$plan.tfvars.path" ]] || die "no saved destroy plan; run ./infra destroy-plan first"
+    expected="$(cat "$plan.tfvars.sha256")"; actual="$(shasum -a 256 "$vars" | awk '{print $1}')"
+    expected_path="$(cat "$plan.tfvars.path")"
+    [[ "$actual" == "$expected" && "$vars" == "$expected_path" ]] || die "tfvars changed after the saved destroy plan; create a new destroy plan"
+    auth "$cloud" "$vars"
+    terraform -chdir="$dir" apply "$plan"
+    ;;
+  endpoints)
+    [[ "${2:-}" == "aws" ]] || die "endpoint operations currently support aws only"
+    case "${3:-}" in
+      status)
+        terraform -chdir="$ROOT/deployments/aws" output -json | jq '{connectivity: .connectivity.value, ncc_rules: .ncc_rules.value}'
+        ;;
+      accept)
+        [[ "${4:-}" == "--service-id" && "${6:-}" == "--endpoint-id" && -n "${5:-}" && -n "${7:-}" ]] || die "accept requires --service-id and --endpoint-id"
+        aws ec2 accept-vpc-endpoint-connections --service-id "$5" --vpc-endpoint-ids "$7"
+        ;;
+      *) usage; exit 2 ;;
+    esac
+    ;;
+  *) usage; exit 2 ;;
+esac
