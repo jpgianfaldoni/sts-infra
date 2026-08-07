@@ -44,6 +44,8 @@ Every enabled data source is deployed in its own VPC. Deployment alone does not 
 | Serverless | `private_link` | Internal NLB and endpoint service, NCC workspace attachment, hostname rule, and a Databricks-managed interface endpoint |
 | Classic to simulated on-premises | `none` | The private test network is deployed without a route to the workspace VPC |
 | Classic to simulated on-premises | `transit_gateway` | Dedicated attachment subnets, TGW attachments and route table, reciprocal VPC routes, and a port-specific security path |
+| Serverless to simulated on-premises | `none` | No NCC private endpoint rule to the on-premises host |
+| Serverless to simulated on-premises | `private_link` | Internal NLB and endpoint service in front of the host, NCC workspace attachment, hostname rule, and a Databricks-managed interface endpoint |
 
 All AWS data sources support the same mode combinations:
 
@@ -54,10 +56,23 @@ All AWS data sources support the same mode combinations:
 | Aurora PostgreSQL | `5432` | `none`, `peering`, `private_link` | `none`, `private_link` |
 | RabbitMQ | `5672` | `none`, `peering`, `private_link` | `none`, `private_link` |
 
-The simulated on-premises network is a classic-compute-only target with modes
-`none` and `transit_gateway`. Serverless compute is outside the workspace VPC and
-therefore cannot use this TGW route; use NCC and PrivateLink for serverless
-private connectivity.
+The simulated on-premises network supports classic modes `none` and
+`transit_gateway`, and serverless modes `none` and `private_link`. Serverless
+compute is outside the workspace VPC and therefore cannot use the TGW route; the
+`private_link` serverless mode fronts the private host with an internal NLB and
+VPC endpoint service, then attaches it to the workspace through an NCC private
+endpoint. Classic Transit Gateway and serverless PrivateLink can be enabled
+together against the same host.
+
+The two paths are reached with different addresses. Classic compute over
+Transit Gateway connects to the host's private IP (for example
+`http://10.60.0.252:8080/health`, shown in the `simulated_on_prem.service_url`
+output). Serverless compute has no route to that RFC1918 address and must use
+the endpoint service's DNS name — the NLB hostname reported in the
+`connectivity.simulated_on_prem.serverless.host` output
+(`http://<name>.elb.<region>.amazonaws.com:8080/health`) — which the NCC private
+endpoint rule binds by domain name. Using the private IP from serverless
+compute fails with `No route to host`.
 
 For example, the same PostgreSQL instance can be reached from classic clusters through peering and from serverless compute through NCC and PrivateLink:
 
@@ -110,6 +125,7 @@ Available examples:
 | `environments/examples/aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
 | `environments/examples/aws/workspace-simulated-on-prem-disconnected.tfvars` | Classic workspace and simulated on-premises VPC without connectivity |
 | `environments/examples/aws/workspace-simulated-on-prem-transit-gateway.tfvars` | Classic workspace connected to a simulated on-premises HTTP service through Transit Gateway |
+| `environments/examples/aws/workspace-simulated-on-prem-serverless-private-link.tfvars` | Workspace reaching a simulated on-premises HTTP service from serverless compute through PrivateLink and an NCC private endpoint |
 | `environments/examples/azure/workspace-sql.tfvars` | Azure VNet-injected workspace and private Azure SQL Database |
 
 For example:

@@ -329,6 +329,67 @@ run "workspace_to_simulated_on_prem_transit_gateway" {
   }
 }
 
+run "workspace_to_simulated_on_prem_serverless_private_link" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        serverless = "private_link"
+      }
+    }
+  }
+  assert {
+    condition     = output.connectivity.simulated_on_prem.serverless.mode == "private_link"
+    error_message = "Serverless compute must reach the simulated network through PrivateLink."
+  }
+}
+
+run "workspace_to_simulated_on_prem_classic_and_serverless" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        classic    = "transit_gateway"
+        serverless = "private_link"
+      }
+    }
+  }
+  assert {
+    condition     = output.connectivity.simulated_on_prem.classic.mode == "transit_gateway" && output.connectivity.simulated_on_prem.serverless.mode == "private_link"
+    error_message = "The simulated network must support classic Transit Gateway and serverless PrivateLink simultaneously."
+  }
+}
+
+run "reject_simulated_on_prem_serverless_peering" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        serverless = "peering"
+      }
+    }
+  }
+  expect_failures = [var.connectivity]
+}
+
 run "reject_simulated_on_prem_connectivity_without_workspace" {
   command = plan
   variables {

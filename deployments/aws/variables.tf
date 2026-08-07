@@ -93,7 +93,8 @@ variable "connectivity" {
       serverless = optional(string, "none")
     }), {})
     simulated_on_prem = optional(object({
-      classic = optional(string, "none")
+      classic    = optional(string, "none")
+      serverless = optional(string, "none")
     }), {})
   })
   default = {
@@ -121,6 +122,10 @@ variable "connectivity" {
     error_message = "Simulated on-premises classic connectivity must be none or transit_gateway."
   }
   validation {
+    condition     = contains(["none", "private_link"], var.connectivity.simulated_on_prem.serverless)
+    error_message = "Simulated on-premises serverless connectivity must be none or private_link."
+  }
+  validation {
     condition = var.features.workspace || alltrue([for value in [
       var.connectivity.rds_postgres.classic,
       var.connectivity.rds_postgres.serverless,
@@ -130,7 +135,8 @@ variable "connectivity" {
       var.connectivity.aurora_postgres.serverless,
       var.connectivity.rabbitmq.classic,
       var.connectivity.rabbitmq.serverless,
-      var.connectivity.simulated_on_prem.classic
+      var.connectivity.simulated_on_prem.classic,
+      var.connectivity.simulated_on_prem.serverless
     ] : value == "none"])
     error_message = "Databricks connectivity requires the workspace feature."
   }
@@ -140,7 +146,7 @@ variable "connectivity" {
       var.features.rds_sql_server || (var.connectivity.rds_sql_server.classic == "none" && var.connectivity.rds_sql_server.serverless == "none"),
       var.features.aurora_postgres || (var.connectivity.aurora_postgres.classic == "none" && var.connectivity.aurora_postgres.serverless == "none"),
       var.features.rabbitmq || (var.connectivity.rabbitmq.classic == "none" && var.connectivity.rabbitmq.serverless == "none"),
-      var.features.simulated_on_prem || var.connectivity.simulated_on_prem.classic == "none"
+      var.features.simulated_on_prem || (var.connectivity.simulated_on_prem.classic == "none" && var.connectivity.simulated_on_prem.serverless == "none")
     ])
     error_message = "Connectivity can only be enabled for a service whose feature is enabled."
   }
