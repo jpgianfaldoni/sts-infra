@@ -116,6 +116,9 @@ Azure feature flags currently deploy the base resources independently; there is 
 
 Files under `environments/examples` are templates with placeholder values. Do not edit them in place. Copy the closest example into the Git-ignored `environments/local` directory and replace the placeholders there.
 
+For AWS, setting `region` is sufficient; the deployment derives two available
+zones in that region unless `availability_zones` is explicitly provided.
+
 Available examples:
 
 | Example | Scenario |
@@ -158,6 +161,14 @@ provider lock before applying. Endpoint acceptance, deployment, and destruction
 are separate external changes.
 
 Destruction also requires a saved plan and typed confirmation:
+
+Before creating it, configure workspace-level authentication so `./infra
+destroy` can terminate active clusters automatically, reject active serverless
+PrivateLink endpoint connections with `./infra endpoints aws reject`, and set
+`allow_destructive_demo_cleanup = true` only for disposable environments so
+versioned buckets can be emptied. See the
+[deployment workflow](guides/operations/deployment.md#destroy) for the full
+checklist.
 
 ```bash
 ./infra destroy-plan aws environments/local/my-aws.tfvars
