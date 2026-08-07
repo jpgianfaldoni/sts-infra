@@ -102,6 +102,11 @@ output "connectivity" {
         service_url        = var.connectivity.simulated_on_prem.classic == "transit_gateway" ? try(module.simulated_on_prem[0].service_url, null) : null
         transit_gateway_id = try(module.simulated_on_prem_transit_gateway[0].transit_gateway_id, null)
       }
+      serverless = {
+        mode             = var.connectivity.simulated_on_prem.serverless
+        endpoint_service = var.connectivity.simulated_on_prem.serverless == "private_link" ? try(module.simulated_on_prem[0].endpoint_service_name, null) : null
+        host             = var.connectivity.simulated_on_prem.serverless == "private_link" ? try(module.simulated_on_prem[0].nlb_dns_name, null) : null
+      }
     }
   }
 }

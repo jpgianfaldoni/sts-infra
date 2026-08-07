@@ -29,3 +29,11 @@ output "service_port" {
 output "service_url" {
   value = "http://${aws_instance.host.private_ip}:${var.service_port}/health"
 }
+
+output "endpoint_service_name" {
+  value = try(aws_vpc_endpoint_service.this[0].service_name, null)
+}
+
+output "nlb_dns_name" {
+  value = try(aws_lb.this[0].dns_name, null)
+}

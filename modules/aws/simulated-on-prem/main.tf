@@ -1,5 +1,10 @@
+data "aws_partition" "current" {}
+data "aws_caller_identity" "current" {}
+
 locals {
   name = "${var.name_prefix}-sim-on-prem"
+
+  enable_serverless_private_link = var.enable_serverless_private_link
 
   vpc_start = sum([
     for index, octet in split(".", cidrhost(var.vpc_cidr, 0)) :
@@ -257,4 +262,97 @@ resource "aws_instance" "host" {
   tags = merge(var.tags, {
     Name = "${local.name}-host"
   })
+}
+
+# --- Serverless PrivateLink: internal NLB + VPC endpoint service ---
+# Fronts the private test host so Databricks serverless compute can reach it
+# through an NCC private endpoint. Only created when serverless PrivateLink is
+# requested for the simulated on-premises network.
+
+resource "aws_security_group" "nlb" {
+  count       = local.enable_serverless_private_link ? 1 : 0
+  name        = "${local.name}-nlb"
+  description = "PrivateLink NLB for the simulated on-premises service"
+  vpc_id      = aws_vpc.this.id
+  tags        = merge(var.tags, { Name = "${local.name}-nlb" })
+}
+
+resource "aws_vpc_security_group_egress_rule" "nlb_to_host" {
+  count                        = local.enable_serverless_private_link ? 1 : 0
+  security_group_id            = aws_security_group.nlb[0].id
+  referenced_security_group_id = aws_security_group.host.id
+  from_port                    = var.service_port
+  to_port                      = var.service_port
+  ip_protocol                  = "tcp"
+  description                  = "Forward to the private test host"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "host_from_nlb" {
+  count                        = local.enable_serverless_private_link ? 1 : 0
+  security_group_id            = aws_security_group.host.id
+  referenced_security_group_id = aws_security_group.nlb[0].id
+  from_port                    = var.service_port
+  to_port                      = var.service_port
+  ip_protocol                  = "tcp"
+  description                  = "HTTP from the PrivateLink NLB"
+}
+
+resource "aws_lb" "this" {
+  count                                                        = local.enable_serverless_private_link ? 1 : 0
+  name                                                         = substr("${local.name}-pl", 0, 32)
+  internal                                                     = true
+  load_balancer_type                                           = "network"
+  subnets                                                      = [aws_subnet.workload.id]
+  security_groups                                              = [aws_security_group.nlb[0].id]
+  enable_cross_zone_load_balancing                             = true
+  enforce_security_group_inbound_rules_on_private_link_traffic = "off"
+  tags                                                         = var.tags
+}
+
+resource "aws_lb_target_group" "this" {
+  count              = local.enable_serverless_private_link ? 1 : 0
+  name               = substr("${local.name}-svc", 0, 32)
+  port               = var.service_port
+  protocol           = "TCP"
+  target_type        = "instance"
+  vpc_id             = aws_vpc.this.id
+  preserve_client_ip = false
+
+  health_check {
+    protocol = "HTTP"
+    port     = "traffic-port"
+    path     = "/health"
+  }
+}
+
+resource "aws_lb_target_group_attachment" "this" {
+  count            = local.enable_serverless_private_link ? 1 : 0
+  target_group_arn = aws_lb_target_group.this[0].arn
+  target_id        = aws_instance.host.id
+  port             = var.service_port
+}
+
+resource "aws_lb_listener" "this" {
+  count             = local.enable_serverless_private_link ? 1 : 0
+  load_balancer_arn = aws_lb.this[0].arn
+  port              = var.service_port
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this[0].arn
+  }
+}
+
+resource "aws_vpc_endpoint_service" "this" {
+  count                      = local.enable_serverless_private_link ? 1 : 0
+  acceptance_required        = true
+  network_load_balancer_arns = [aws_lb.this[0].arn]
+  tags                       = merge(var.tags, { Name = "${local.name}-endpoint-service" })
+}
+
+resource "aws_vpc_endpoint_service_allowed_principal" "serverless" {
+  count                   = local.enable_serverless_private_link ? 1 : 0
+  vpc_endpoint_service_id = aws_vpc_endpoint_service.this[0].id
+  principal_arn           = "arn:${data.aws_partition.current.partition}:iam::565502421330:role/private-connectivity-role-${var.region}"
 }

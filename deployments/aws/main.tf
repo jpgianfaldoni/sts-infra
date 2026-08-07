@@ -87,14 +87,15 @@ module "simulated_on_prem" {
   count  = var.features.simulated_on_prem ? 1 : 0
   source = "../../modules/aws/simulated-on-prem"
 
-  name_prefix          = var.name_prefix
-  region               = var.region
-  availability_zone    = var.availability_zones[0]
-  vpc_cidr             = var.simulated_on_prem.vpc_cidr
-  workload_subnet_cidr = var.simulated_on_prem.workload_subnet_cidr
-  instance_type        = var.simulated_on_prem.instance_type
-  service_port         = var.simulated_on_prem.service_port
-  tags                 = var.tags
+  name_prefix                    = var.name_prefix
+  region                         = var.region
+  availability_zone              = var.availability_zones[0]
+  vpc_cidr                       = var.simulated_on_prem.vpc_cidr
+  workload_subnet_cidr           = var.simulated_on_prem.workload_subnet_cidr
+  instance_type                  = var.simulated_on_prem.instance_type
+  service_port                   = var.simulated_on_prem.service_port
+  enable_serverless_private_link = var.connectivity.simulated_on_prem.serverless == "private_link"
+  tags                           = var.tags
 }
 
 locals {
@@ -226,6 +227,11 @@ locals {
       domain_names = [module.rabbitmq[0].host]
       }
       } : {
+    },
+    var.features.simulated_on_prem && var.connectivity.simulated_on_prem.serverless == "private_link" ? { simulated_on_prem = { endpoint_service = module.simulated_on_prem[0].endpoint_service_name
+      domain_names = [module.simulated_on_prem[0].nlb_dns_name]
+      }
+      } : {
     }
   )
 }
@@ -239,7 +245,7 @@ module "ncc" {
   region                 = var.region
   workspace_id           = module.workspace[0].workspace_id
   private_endpoint_rules = local.ncc_rules
-  depends_on             = [module.rds_postgres, module.rds_sql_server, module.aurora_postgres, module.rabbitmq]
+  depends_on             = [module.rds_postgres, module.rds_sql_server, module.aurora_postgres, module.rabbitmq, module.simulated_on_prem]
 }
 
 module "postgres_peering" {

@@ -48,6 +48,12 @@ variable "service_port" {
   }
 }
 
+variable "enable_serverless_private_link" {
+  description = "Create an internal NLB and VPC endpoint service so Databricks serverless compute can reach the host through an NCC private endpoint."
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   description = "Tags applied to simulated on-premises resources."
   type        = map(string)
