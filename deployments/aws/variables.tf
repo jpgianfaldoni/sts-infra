@@ -32,8 +32,19 @@ variable "workspace_name" {
   default = "demo-classic"
 }
 variable "availability_zones" {
-  type    = list(string)
-  default = ["us-west-2a", "us-west-2b"]
+  description = "Optional pair of availability zones. When omitted, the first two available zones in var.region are selected."
+  type        = list(string)
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.availability_zones == null || (
+      length(var.availability_zones) == 2 &&
+      var.availability_zones[0] != var.availability_zones[1] &&
+      alltrue([for zone in var.availability_zones : startswith(zone, var.region)])
+    )
+    error_message = "availability_zones must contain two distinct zones in the selected AWS region."
+  }
 }
 variable "workspace_network" {
   type = object({

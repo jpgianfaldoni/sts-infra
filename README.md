@@ -116,6 +116,9 @@ Azure feature flags currently deploy the base resources independently; there is 
 
 Files under `environments/examples` are templates with placeholder values. Do not edit them in place. Copy the closest example into the Git-ignored `environments/local` directory and replace the placeholders there.
 
+For AWS, setting `region` is sufficient; the deployment derives two available
+zones in that region unless `availability_zones` is explicitly provided.
+
 Available examples:
 
 | Example | Scenario |

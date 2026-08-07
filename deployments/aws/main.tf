@@ -1,3 +1,11 @@
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+locals {
+  availability_zones = var.availability_zones != null ? var.availability_zones : slice(data.aws_availability_zones.available.names, 0, 2)
+}
+
 module "workspace" {
   count  = var.features.workspace ? 1 : 0
   source = "../../modules/aws/databricks-workspace"
@@ -9,7 +17,7 @@ module "workspace" {
   workspace_name            = var.workspace_name
   resource_prefix           = var.name_prefix
   vpc_cidr                  = var.workspace_network.vpc_cidr
-  availability_zones        = var.availability_zones
+  availability_zones        = local.availability_zones
   private_subnet_cidrs      = var.workspace_network.private_subnet_cidrs
   public_subnet_cidr        = var.workspace_network.public_subnet_cidr
   force_destroy_root_bucket = var.allow_destructive_demo_cleanup
@@ -89,7 +97,7 @@ module "simulated_on_prem" {
 
   name_prefix                    = var.name_prefix
   region                         = var.region
-  availability_zone              = var.availability_zones[0]
+  availability_zone              = local.availability_zones[0]
   vpc_cidr                       = var.simulated_on_prem.vpc_cidr
   workload_subnet_cidr           = var.simulated_on_prem.workload_subnet_cidr
   instance_type                  = var.simulated_on_prem.instance_type
@@ -131,7 +139,7 @@ module "simulated_on_prem_transit_gateway" {
   source = "../../modules/aws/transit-gateway"
 
   name                              = "${var.name_prefix}-sim-on-prem"
-  availability_zones                = var.availability_zones
+  availability_zones                = local.availability_zones
   workspace_vpc_id                  = module.workspace[0].vpc_id
   workspace_vpc_cidr                = module.workspace[0].vpc_cidr
   workspace_attachment_subnet_cidrs = var.workspace_network.tgw_attachment_subnet_cidrs
