@@ -137,6 +137,8 @@ cp environments/examples/aws/workspace-postgres.tfvars environments/local/my-aws
 
 ## Deploy safely
 
+Terraform 1.11 or newer is required.
+
 Set local authentication profiles in the shell, validate, save a plan, review
 it, and then apply that exact plan:
 

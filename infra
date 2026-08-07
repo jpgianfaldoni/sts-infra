@@ -148,11 +148,19 @@ terraform_for_environment() {
 }
 
 aws_cli() {
+  local args=("$@")
+  [[ -z "${AUTH_AWS_REGION:-}" ]] || args+=(--region "$AUTH_AWS_REGION")
   if [[ -n "${AUTH_AWS_PROFILE:-}" ]]; then
-    aws "$@" --profile "$AUTH_AWS_PROFILE"
-  else
-    aws "$@"
+    args+=(--profile "$AUTH_AWS_PROFILE")
   fi
+  aws "${args[@]}"
+}
+
+aws_region_for() {
+  local vars="$1" region
+  region="$(tfvar_string "$vars" region)"
+  region="${region:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}}"
+  printf '%s' "${region:-us-west-2}"
 }
 
 preflight() {
@@ -161,8 +169,10 @@ preflight() {
   cloud_root "$cloud" >/dev/null
   AUTH_TF_ARGS=()
   AUTH_AWS_PROFILE=""
+  AUTH_AWS_REGION=""
 
   if [[ "$cloud" == "aws" ]]; then
+    AUTH_AWS_REGION="$(aws_region_for "$vars")"
     AUTH_AWS_PROFILE="${AWS_PROFILE:-$(tfvar_string "$vars" aws_profile)}"
     AUTH_DB_ACCOUNT_PROFILE="${DATABRICKS_ACCOUNT_PROFILE:-${DATABRICKS_CONFIG_PROFILE:-$(tfvar_string "$vars" databricks_profile)}}"
     AUTH_DB_WORKSPACE_PROFILE="${DATABRICKS_WORKSPACE_PROFILE:-$(tfvar_string "$vars" databricks_workspace_profile)}"
@@ -189,8 +199,8 @@ preflight() {
       AUTH_TF_ARGS+=("-var=aws_profile=$AUTH_AWS_PROFILE")
     fi
 
-    AUTH_CONTEXT_SHA="$(printf 'cloud=aws\naws_account=%s\naws_profile=%s\ndatabricks_account=%s\ndatabricks_account_profile=%s\ndatabricks_workspace_profile=%s\n' \
-      "$aws_account_id" "$AUTH_AWS_PROFILE" "$db_account_id" "$AUTH_DB_ACCOUNT_PROFILE" "$AUTH_DB_WORKSPACE_PROFILE" | stdin_sha256)"
+    AUTH_CONTEXT_SHA="$(printf 'cloud=aws\naws_account=%s\naws_profile=%s\naws_region=%s\ndatabricks_account=%s\ndatabricks_account_profile=%s\ndatabricks_workspace_profile=%s\n' \
+      "$aws_account_id" "$AUTH_AWS_PROFILE" "$AUTH_AWS_REGION" "$db_account_id" "$AUTH_DB_ACCOUNT_PROFILE" "$AUTH_DB_WORKSPACE_PROFILE" | stdin_sha256)"
     echo "AWS and Databricks authentication preflight passed."
   else
     subscription="$(tfvar_string "$vars" subscription_id)"
