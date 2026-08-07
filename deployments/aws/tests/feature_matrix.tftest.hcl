@@ -56,6 +56,47 @@ mock_provider "random" {}
 mock_provider "time" {}
 mock_provider "archive" {}
 
+run "derive_availability_zones_from_region" {
+  command = plan
+
+  override_data {
+    target = data.aws_availability_zones.available
+    values = {
+      names = ["ca-central-1a", "ca-central-1b", "ca-central-1d"]
+    }
+  }
+
+  variables {
+    region                = "ca-central-1"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.availability_zones == tolist(["ca-central-1a", "ca-central-1b"])
+    error_message = "Availability zones must be derived from the selected AWS region."
+  }
+}
+
+run "reject_availability_zones_from_another_region" {
+  command = plan
+
+  variables {
+    region                = "ca-central-1"
+    availability_zones    = ["us-west-2a", "us-west-2b"]
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  expect_failures = [var.availability_zones]
+}
+
 run "all_features_disabled" {
   command = plan
   variables {

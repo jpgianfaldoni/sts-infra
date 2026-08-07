@@ -1,3 +1,8 @@
+output "availability_zones" {
+  description = "Availability zones selected for workspace and simulated on-premises networking."
+  value       = local.availability_zones
+}
+
 output "workspace_url" {
   value = try(module.workspace[0].workspace_url, null)
 }
