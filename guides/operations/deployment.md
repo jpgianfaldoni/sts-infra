@@ -62,9 +62,14 @@ for supported combinations.
 
 Before creating an AWS destroy plan:
 
-1. Stop or delete every classic Databricks cluster attached to the workspace.
-   Cluster instances are runtime resources outside Terraform state; their ENIs
-   otherwise keep the workspace subnets and VPC alive after workspace deletion.
+1. Ensure workspace-level authentication is available through
+   `DATABRICKS_WORKSPACE_PROFILE` or workspace OAuth environment credentials.
+   After the saved plan is verified and the typed destroy confirmation is
+   supplied, `./infra destroy` automatically terminates every non-terminated
+   cluster and waits for termination before Terraform deletes the workspace.
+   Any authentication or termination failure aborts destroy. Cluster instances
+   are runtime resources outside Terraform state, so this prevents their ENIs
+   from retaining the workspace subnets and VPC.
 2. Run `./infra endpoints aws status ...`. For every active serverless
    PrivateLink connection, review its IDs and run the explicit `endpoints aws
    reject` command documented in the [AWS connectivity guide](../aws/connectivity.md).
@@ -75,9 +80,10 @@ Before creating an AWS destroy plan:
    snapshots. If protected resources already exist, first plan and apply that
    configuration change.
 
-These prerequisites prevent unmanaged cluster ENIs, endpoint connections, and
-versioned bucket objects from blocking Terraform teardown. Then save, review,
-explicitly authorize, and apply the destroy plan:
+These steps prevent unmanaged cluster ENIs, endpoint connections, and versioned
+bucket objects from blocking Terraform teardown. Then save, review, explicitly
+authorize, and apply the destroy plan. The confirmation authorizes both cluster
+termination and the reviewed Terraform destroy plan:
 
 ```bash
 ./infra destroy-plan aws environments/local/my-aws.tfvars

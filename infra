@@ -148,6 +148,48 @@ terraform_for_environment() {
   TF_DATA_DIR="$ENV_TF_DATA" TF_WORKSPACE="$ENV_ID" terraform -chdir="$ENV_DIR" "$@"
 }
 
+databricks_workspace_cli() {
+  local workspace_url="$1"
+  shift
+  if [[ -n "${AUTH_DB_WORKSPACE_PROFILE:-}" ]]; then
+    databricks "$@" --profile "$AUTH_DB_WORKSPACE_PROFILE"
+  else
+    DATABRICKS_HOST="$workspace_url" databricks "$@"
+  fi
+}
+
+terminate_workspace_clusters() {
+  local workspace_output workspace_url clusters_json cluster_rows cluster_id cluster_name terminated=0
+  workspace_output="$(terraform_for_environment output -json)" ||
+    die "could not read the workspace URL from Terraform state before destroy"
+  workspace_url="$(printf '%s' "$workspace_output" | jq -r '.workspace_url.value // empty')" ||
+    die "could not parse the workspace URL from Terraform state before destroy"
+  if [[ -z "$workspace_url" ]]; then
+    echo "No workspace in state; skipping cluster termination."
+    return 0
+  fi
+
+  databricks_workspace_cli "$workspace_url" current-user me --output json >/dev/null ||
+    die "Databricks workspace authentication is required to terminate clusters before destroy. Set DATABRICKS_WORKSPACE_PROFILE or workspace OAuth environment credentials."
+  clusters_json="$(databricks_workspace_cli "$workspace_url" clusters list --output json)" ||
+    die "could not list Databricks clusters before destroy"
+  cluster_rows="$(printf '%s' "$clusters_json" | jq -r '
+    (if type == "array" then . else (.clusters // []) end)[] |
+    select(.state != "TERMINATED") |
+    [.cluster_id, (.cluster_name // "unnamed")] | @tsv
+  ')" || die "could not parse the Databricks cluster list before destroy"
+
+  while IFS=$'\t' read -r cluster_id cluster_name; do
+    [[ -n "$cluster_id" ]] || continue
+    echo "Terminating Databricks cluster: ${cluster_name:-unnamed} ($cluster_id)"
+    databricks_workspace_cli "$workspace_url" clusters delete "$cluster_id" --timeout 20m ||
+      die "cluster $cluster_id did not terminate; Terraform destroy was not started"
+    terminated=$((terminated + 1))
+  done <<< "$cluster_rows"
+
+  echo "Databricks cluster cleanup complete: $terminated cluster(s) terminated."
+}
+
 aws_cli() {
   if [[ -n "${AUTH_AWS_PROFILE:-}" ]]; then
     aws "$@" --profile "$AUTH_AWS_PROFILE"
@@ -296,6 +338,9 @@ apply_plan() {
   terraform_for_environment init -backend=false -lockfile=readonly
   verify_plan_metadata "$metadata" "$action"
   show_plan_summary "$plan"
+  if [[ "$action" == "destroy" && "$cloud" == "aws" ]]; then
+    terminate_workspace_clusters
+  fi
   terraform_for_environment apply "$plan"
   date -u +'%Y-%m-%dT%H:%M:%SZ' > "$plan.applied"
 }
