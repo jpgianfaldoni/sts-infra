@@ -373,7 +373,10 @@ apply_plan() {
   if [[ "$action" == "destroy" && "$cloud" == "aws" ]]; then
     terminate_workspace_clusters
   fi
-  terraform_for_environment apply "$plan"
+  if ! terraform_for_environment apply "$plan"; then
+    echo "ERROR: Terraform $action failed; resources may remain and the saved plan was not marked as applied." >&2
+    return 1
+  fi
   date -u +'%Y-%m-%dT%H:%M:%SZ' > "$plan.applied"
 }
 
