@@ -295,7 +295,10 @@ apply_plan() {
   terraform_for_environment init -backend=false -lockfile=readonly
   verify_plan_metadata "$metadata" "$action"
   show_plan_summary "$plan"
-  terraform_for_environment apply "$plan"
+  if ! terraform_for_environment apply "$plan"; then
+    echo "ERROR: Terraform $action failed; resources may remain and the saved plan was not marked as applied." >&2
+    return 1
+  fi
   date -u +'%Y-%m-%dT%H:%M:%SZ' > "$plan.applied"
 }
 
