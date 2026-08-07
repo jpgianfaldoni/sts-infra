@@ -28,6 +28,10 @@ simulated_on_prem = {
   service_port         = 8080
 }
 
+# Disposable environments only. This empties versioned workspace buckets during
+# destroy and avoids leaving billable resources behind after a lab.
+allow_destructive_demo_cleanup = true
+
 tags = {
   ManagedBy   = "terraform"
   Environment = "demo"

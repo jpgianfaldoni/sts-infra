@@ -60,11 +60,24 @@ for supported combinations.
 
 ## Destroy
 
-For disposable AWS environments,
-`allow_destructive_demo_cleanup = true` disables database deletion protection
-and skips final snapshots. If protected resources already exist, first plan
-and apply that configuration change. Then save, review, explicitly authorize,
-and apply the destroy plan:
+Before creating an AWS destroy plan:
+
+1. Stop or delete every classic Databricks cluster attached to the workspace.
+   Cluster instances are runtime resources outside Terraform state; their ENIs
+   otherwise keep the workspace subnets and VPC alive after workspace deletion.
+2. Run `./infra endpoints aws status ...`. For every active serverless
+   PrivateLink connection, review its IDs and run the explicit `endpoints aws
+   reject` command documented in the [AWS connectivity guide](../aws/connectivity.md).
+   Wait until AWS no longer reports an active connection.
+3. For disposable environments, set
+   `allow_destructive_demo_cleanup = true`. This empties versioned workspace and
+   Unity Catalog buckets, disables database deletion protection, and skips final
+   snapshots. If protected resources already exist, first plan and apply that
+   configuration change.
+
+These prerequisites prevent unmanaged cluster ENIs, endpoint connections, and
+versioned bucket objects from blocking Terraform teardown. Then save, review,
+explicitly authorize, and apply the destroy plan:
 
 ```bash
 ./infra destroy-plan aws environments/local/my-aws.tfvars

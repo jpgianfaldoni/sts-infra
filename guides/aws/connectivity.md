@@ -107,3 +107,16 @@ After reviewing the service and endpoint IDs, accept only the expected connectio
 ```
 
 Acceptance changes external state and is not performed by validation or planning.
+
+Before destroying an endpoint service, reject its managed endpoint connection;
+AWS will not delete a service while an active consumer endpoint remains:
+
+```bash
+./infra endpoints aws reject environments/local/my-aws.tfvars \
+  --service-id vpce-svc-... \
+  --endpoint-id vpce-... \
+  --confirm reject-aws-endpoint
+```
+
+Review the IDs with `endpoints aws status` first. Rejection is an explicit
+external state change and disconnects serverless traffic immediately.

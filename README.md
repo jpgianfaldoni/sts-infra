@@ -159,6 +159,13 @@ are separate external changes.
 
 Destruction also requires a saved plan and typed confirmation:
 
+Before creating it, stop all classic clusters, reject active serverless
+PrivateLink endpoint connections with `./infra endpoints aws reject`, and set
+`allow_destructive_demo_cleanup = true` only for disposable environments so
+versioned buckets can be emptied. See the
+[deployment workflow](guides/operations/deployment.md#destroy) for the full
+checklist.
+
 ```bash
 ./infra destroy-plan aws environments/local/my-aws.tfvars
 ./infra destroy aws environments/local/my-aws.tfvars --confirm destroy-aws
