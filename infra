@@ -159,7 +159,8 @@ databricks_workspace_cli() {
 }
 
 terminate_workspace_clusters() {
-  local workspace_output workspace_url clusters_json cluster_rows cluster_id cluster_name terminated=0
+  local workspace_output workspace_url clusters_json cluster_rows cluster_ids=""
+  local cluster_id cluster_name remaining_rows deadline_at requested=0
   workspace_output="$(terraform_for_environment output -json)" ||
     die "could not read the workspace URL from Terraform state before destroy"
   workspace_url="$(printf '%s' "$workspace_output" | jq -r '.workspace_url.value // empty')" ||
@@ -181,13 +182,44 @@ terminate_workspace_clusters() {
 
   while IFS=$'\t' read -r cluster_id cluster_name; do
     [[ -n "$cluster_id" ]] || continue
-    echo "Terminating Databricks cluster: ${cluster_name:-unnamed} ($cluster_id)"
-    databricks_workspace_cli "$workspace_url" clusters delete "$cluster_id" --timeout 20m ||
-      die "cluster $cluster_id did not terminate; Terraform destroy was not started"
-    terminated=$((terminated + 1))
+    echo "Requesting Databricks cluster termination: ${cluster_name:-unnamed} ($cluster_id)"
+    databricks_workspace_cli "$workspace_url" clusters delete "$cluster_id" --no-wait ||
+      die "could not request termination for cluster $cluster_id; Terraform destroy was not started"
+    cluster_ids+="$cluster_id"$'\n'
+    requested=$((requested + 1))
   done <<< "$cluster_rows"
 
-  echo "Databricks cluster cleanup complete: $terminated cluster(s) terminated."
+  if [[ "$requested" -eq 0 ]]; then
+    echo "Databricks cluster cleanup complete: no active clusters."
+    return 0
+  fi
+
+  deadline_at=$(($(date +%s) + 1200))
+  while true; do
+    clusters_json="$(databricks_workspace_cli "$workspace_url" clusters list --output json)" ||
+      die "could not check Databricks cluster termination progress"
+    remaining_rows="$(printf '%s' "$clusters_json" | jq -r --arg cluster_ids "$cluster_ids" '
+      ($cluster_ids | split("\n") | map(select(length > 0))) as $targets |
+      (if type == "array" then . else (.clusters // []) end)[] |
+      select(.cluster_id as $id | $targets | index($id)) |
+      select(.state != "TERMINATED") |
+      [.cluster_id, (.cluster_name // "unnamed"), .state] | @tsv
+    ')" || die "could not parse Databricks cluster termination progress"
+
+    if [[ -z "$remaining_rows" ]]; then
+      echo "Databricks cluster cleanup complete: $requested cluster(s) terminated."
+      return 0
+    fi
+    if [[ "$(date +%s)" -ge "$deadline_at" ]]; then
+      echo "Clusters still active after the shared 20-minute cleanup deadline:" >&2
+      printf '%s\n' "$remaining_rows" >&2
+      die "Databricks clusters did not terminate; Terraform destroy was not started"
+    fi
+
+    echo "Waiting for Databricks clusters to terminate:"
+    printf '%s\n' "$remaining_rows"
+    sleep 10
+  done
 }
 
 aws_cli() {

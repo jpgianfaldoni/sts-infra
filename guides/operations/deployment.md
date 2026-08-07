@@ -65,11 +65,12 @@ Before creating an AWS destroy plan:
 1. Ensure workspace-level authentication is available through
    `DATABRICKS_WORKSPACE_PROFILE` or workspace OAuth environment credentials.
    After the saved plan is verified and the typed destroy confirmation is
-   supplied, `./infra destroy` automatically terminates every non-terminated
-   cluster and waits for termination before Terraform deletes the workspace.
-   Any authentication or termination failure aborts destroy. Cluster instances
-   are runtime resources outside Terraform state, so this prevents their ENIs
-   from retaining the workspace subnets and VPC.
+   supplied, `./infra destroy` sends termination requests for every
+   non-terminated cluster, then waits for all of them under one shared 20-minute
+   deadline before Terraform deletes the workspace. Any authentication,
+   request, or timeout failure aborts destroy. Cluster instances are runtime
+   resources outside Terraform state, so this prevents their ENIs from retaining
+   the workspace subnets and VPC.
 2. Run `./infra endpoints aws status ...`. For every active serverless
    PrivateLink connection, review its IDs and run the explicit `endpoints aws
    reject` command documented in the [AWS connectivity guide](../aws/connectivity.md).
