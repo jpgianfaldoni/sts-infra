@@ -1,6 +1,4 @@
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
-aws_profile           = "your-aws-profile"
-databricks_profile    = "your-databricks-account-profile"
 name_prefix           = "acme-isolated"
 workspace_name        = "acme-isolated-classic"
 

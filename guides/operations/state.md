@@ -1,12 +1,48 @@
 # Terraform state
 
-This repository uses Terraform's local state only. It does not configure or support a remote backend.
+This repository uses local state only. It does not configure a remote backend.
 
-Terraform stores each cloud's state in its deployment root:
+`./infra` isolates state by cloud and deployment ID:
 
-- AWS: `deployments/aws/terraform.tfstate`
-- Azure: `deployments/azure/terraform.tfstate`
+```text
+.state/<cloud>/<deployment-id>/terraform.tfstate
+```
 
-State files are ignored by Git because they contain resource metadata and may contain sensitive values. Keep them on a trusted machine, do not commit or share them, and back them up securely if the environment must be recoverable.
+The default deployment ID is the tfvars filename without `.tfvars`. An
+application or automation worker should supply its own stable identifier:
 
-Each cloud root has a single local state. Do not use different environment files against the same cloud root unless they intentionally describe the same deployed environment.
+```bash
+export INFRA_DEPLOYMENT_ID=<customer-id>-<deployment-id>
+```
+
+Each deployment ID is bound to one absolute environment-file path to prevent
+two local configurations from accidentally sharing state. Plans, provider
+runtime data, and operation locks are isolated under the corresponding
+`.artifacts/<cloud>/<deployment-id>` directory.
+
+State and artifact directories are ignored by Git. State can contain resource
+metadata and sensitive values: keep it on a trusted machine, do not commit or
+share it, and back it up securely when the environment must be recoverable.
+
+## Migrating legacy state
+
+Older repository versions stored one state at
+`deployments/<cloud>/terraform.tfstate`. `./infra` will not silently treat that
+state as a new deployment because doing so could duplicate expensive resources.
+Migrate it explicitly using the exact confirmation printed by `./infra`:
+
+```bash
+./infra state-migrate aws environments/local/my-aws.tfvars \
+  --confirm migrate-aws-my-aws
+```
+
+The command moves the legacy state and its backup; it does not change cloud
+resources. Create and review a new saved plan after migration.
+
+## Hosted applications
+
+Per-deployment local state makes the CLI safe for independent local labs, but
+it is not sufficient for a multi-worker or multi-customer hosted service. Such
+an application should replace this storage layer with encrypted remote state,
+locking, access controls, backups, and an audit trail. The Terraform modules
+and plan/approval workflow can remain unchanged.

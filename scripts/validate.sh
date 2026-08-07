@@ -9,6 +9,7 @@ terraform -chdir="$ROOT/deployments/$cloud" init -backend=false
 terraform -chdir="$ROOT/deployments/$cloud" validate
 terraform -chdir="$ROOT/deployments/$cloud" test
 terraform fmt -check -recursive "$ROOT/deployments/$cloud" "$ROOT/modules/$cloud"
+bash -n "$ROOT/infra"
 python3 "$ROOT/tests/check_manifest.py"
 python3 "$ROOT/tests/check_python_syntax.py"
 python3 "$ROOT/tests/check_links.py"

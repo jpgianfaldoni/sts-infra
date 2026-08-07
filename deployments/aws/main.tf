@@ -83,6 +83,72 @@ module "rabbitmq" {
   tags                           = var.tags
 }
 
+module "simulated_on_prem" {
+  count  = var.features.simulated_on_prem ? 1 : 0
+  source = "../../modules/aws/simulated-on-prem"
+
+  name_prefix          = var.name_prefix
+  region               = var.region
+  availability_zone    = var.availability_zones[0]
+  vpc_cidr             = var.simulated_on_prem.vpc_cidr
+  workload_subnet_cidr = var.simulated_on_prem.workload_subnet_cidr
+  instance_type        = var.simulated_on_prem.instance_type
+  service_port         = var.simulated_on_prem.service_port
+  tags                 = var.tags
+}
+
+locals {
+  workspace_vpc_start = sum([
+    for index, octet in split(".", try(cidrhost(var.workspace_network.vpc_cidr, 0), "0.0.0.0")) :
+    tonumber(octet) * pow(256, 3 - index)
+  ])
+  workspace_vpc_end = local.workspace_vpc_start + pow(2, 32 - try(tonumber(split("/", var.workspace_network.vpc_cidr)[1]), 32)) - 1
+
+  simulated_on_prem_vpc_start = sum([
+    for index, octet in split(".", try(cidrhost(var.simulated_on_prem.vpc_cidr, 0), "0.0.0.0")) :
+    tonumber(octet) * pow(256, 3 - index)
+  ])
+  simulated_on_prem_vpc_end = local.simulated_on_prem_vpc_start + pow(2, 32 - try(tonumber(split("/", var.simulated_on_prem.vpc_cidr)[1]), 32)) - 1
+}
+
+resource "terraform_data" "simulated_on_prem_network_validation" {
+  count = var.features.simulated_on_prem && var.connectivity.simulated_on_prem.classic == "transit_gateway" ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition = (
+        local.workspace_vpc_end < local.simulated_on_prem_vpc_start ||
+        local.simulated_on_prem_vpc_end < local.workspace_vpc_start
+      )
+      error_message = "The workspace and simulated on-premises VPC CIDRs must not overlap."
+    }
+  }
+}
+
+module "simulated_on_prem_transit_gateway" {
+  count  = var.features.simulated_on_prem && var.connectivity.simulated_on_prem.classic == "transit_gateway" ? 1 : 0
+  source = "../../modules/aws/transit-gateway"
+
+  name                              = "${var.name_prefix}-sim-on-prem"
+  availability_zones                = var.availability_zones
+  workspace_vpc_id                  = module.workspace[0].vpc_id
+  workspace_vpc_cidr                = module.workspace[0].vpc_cidr
+  workspace_attachment_subnet_cidrs = var.workspace_network.tgw_attachment_subnet_cidrs
+  workspace_existing_subnet_cidrs   = concat(var.workspace_network.private_subnet_cidrs, [var.workspace_network.public_subnet_cidr])
+  workspace_route_table_ids         = module.workspace[0].private_route_table_ids
+  workspace_security_group_id       = module.workspace[0].security_group_id
+  on_prem_vpc_id                    = module.simulated_on_prem[0].vpc_id
+  on_prem_vpc_cidr                  = module.simulated_on_prem[0].vpc_cidr
+  on_prem_attachment_subnet_cidrs   = var.simulated_on_prem.tgw_attachment_subnet_cidrs
+  on_prem_existing_subnet_cidrs     = [var.simulated_on_prem.workload_subnet_cidr]
+  on_prem_route_table_ids           = module.simulated_on_prem[0].workload_route_table_ids
+  on_prem_security_group_id         = module.simulated_on_prem[0].host_security_group_id
+  service_port                      = module.simulated_on_prem[0].service_port
+  tags                              = var.tags
+
+  depends_on = [terraform_data.simulated_on_prem_network_validation]
+}
+
 module "rds_postgres_classic_private_link" {
   count  = var.features.rds_postgres && var.connectivity.rds_postgres.classic == "private_link" ? 1 : 0
   source = "../../modules/aws/classic-private-link"

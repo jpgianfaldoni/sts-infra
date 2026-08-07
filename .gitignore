@@ -1,4 +1,5 @@
 .terraform/
+terraform.tfstate.d/
 *.tfstate
 *.tfstate.*
 *.tfplan
@@ -7,6 +8,7 @@ terraform.tfvars
 *.auto.tfvars.json
 backend.tf
 .artifacts/
+.state/
 .sts-infra/
 environments/local/
 __pycache__/

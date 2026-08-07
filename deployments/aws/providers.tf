@@ -16,5 +16,5 @@ provider "databricks" {
 provider "databricks" {
   alias   = "workspace"
   host    = try(module.workspace[0].workspace_url, "https://workspace-not-created.invalid")
-  profile = coalesce(var.databricks_workspace_profile, var.databricks_profile)
+  profile = try(coalesce(var.databricks_workspace_profile, var.databricks_profile), null)
 }

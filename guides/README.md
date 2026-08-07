@@ -7,6 +7,7 @@ Guides are organized by cloud, Databricks compute type, and data source.
 - [Connectivity modes](aws/connectivity.md)
 - [Classic compute](aws/classic/README.md)
 - [Serverless compute](aws/serverless/README.md)
+- [Simulated on-premises network](aws/classic/simulated-on-prem/overview.md)
 
 ## Azure
 
@@ -18,3 +19,4 @@ Guides are organized by cloud, Databricks compute type, and data source.
 - [Authentication](operations/authentication.md)
 - [Deployment workflow](operations/deployment.md)
 - [Local Terraform state](operations/state.md)
+- [Application integration baseline](operations/application-integration.md)

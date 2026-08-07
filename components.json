@@ -11,8 +11,10 @@
         "aurora_postgres": { "module": "aurora-postgres", "feature": "features.aurora_postgres", "connectivity": { "classic": { "path": "connectivity.aurora_postgres.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.aurora_postgres.serverless", "modes": ["none", "private_link"] } } },
         "aurora_proxy": { "module": "aurora-postgres", "feature": "features.aurora_proxy", "dependencies": ["aurora_postgres"] },
         "rabbitmq": { "module": "rabbitmq", "feature": "features.rabbitmq", "connectivity": { "classic": { "path": "connectivity.rabbitmq.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.rabbitmq.serverless", "modes": ["none", "private_link"] } } },
+        "simulated_on_prem": { "module": "simulated-on-prem", "feature": "features.simulated_on_prem", "connectivity": { "classic": { "path": "connectivity.simulated_on_prem.classic", "modes": ["none", "transit_gateway"] } } },
         "classic_private_link": { "module": "classic-private-link", "feature": "derived.classic_private_link", "dependencies": ["workspace"] },
-        "ncc": { "module": "ncc", "feature": "derived.serverless_private_link", "dependencies": ["workspace"] }
+        "ncc": { "module": "ncc", "feature": "derived.serverless_private_link", "dependencies": ["workspace"] },
+        "transit_gateway": { "module": "transit-gateway", "feature": "derived.simulated_on_prem_transit_gateway", "dependencies": ["workspace", "simulated_on_prem"] }
       }
     },
     "azure": {

@@ -34,6 +34,16 @@ output "rabbitmq" {
     secret_arn = module.rabbitmq[0].secret_arn
   }, null)
 }
+output "simulated_on_prem" {
+  value = try({
+    vpc_id       = module.simulated_on_prem[0].vpc_id
+    instance_id  = module.simulated_on_prem[0].instance_id
+    private_ip   = module.simulated_on_prem[0].private_ip
+    service_port = module.simulated_on_prem[0].service_port
+    service_url  = module.simulated_on_prem[0].service_url
+    ssm_command  = "aws ssm start-session --target ${module.simulated_on_prem[0].instance_id} --region ${var.region}"
+  }, null)
+}
 output "ncc_rules" {
   value = try(module.ncc[0].rules, {
   })
@@ -84,6 +94,13 @@ output "connectivity" {
       serverless = {
         mode = var.connectivity.rabbitmq.serverless
         host = var.connectivity.rabbitmq.serverless == "private_link" ? try(module.rabbitmq[0].host, null) : null
+      }
+    }
+    simulated_on_prem = {
+      classic = {
+        mode               = var.connectivity.simulated_on_prem.classic
+        service_url        = var.connectivity.simulated_on_prem.classic == "transit_gateway" ? try(module.simulated_on_prem[0].service_url, null) : null
+        transit_gateway_id = try(module.simulated_on_prem_transit_gateway[0].transit_gateway_id, null)
       }
     }
   }

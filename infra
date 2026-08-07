@@ -7,15 +7,25 @@ usage() {
   cat <<'EOF'
 Usage:
   ./infra list
-  ./infra auth <aws|azure> <environment.tfvars>
+  ./infra doctor <aws|azure> <environment.tfvars>
   ./infra validate <aws|azure>
   ./infra plan <aws|azure> <environment.tfvars>
   ./infra apply <aws|azure> <environment.tfvars>
-  ./infra output <aws|azure>
+  ./infra output <aws|azure> <environment.tfvars>
   ./infra destroy-plan <aws|azure> <environment.tfvars>
   ./infra destroy <aws|azure> <environment.tfvars> --confirm destroy-<cloud>
-  ./infra endpoints aws status
-  ./infra endpoints aws accept --service-id vpce-svc-... --endpoint-id vpce-...
+  ./infra state-migrate <aws|azure> <environment.tfvars> --confirm migrate-<cloud>-<deployment-id>
+  ./infra endpoints aws status <environment.tfvars>
+  ./infra endpoints aws accept <environment.tfvars> --service-id vpce-svc-... --endpoint-id vpce-...
+
+Authentication overrides for local operators:
+  AWS_PROFILE
+  DATABRICKS_ACCOUNT_PROFILE (DATABRICKS_CONFIG_PROFILE is also supported)
+  DATABRICKS_WORKSPACE_PROFILE
+
+Automation can omit profiles and use the standard AWS and Databricks provider
+environment variables. Set INFRA_DEPLOYMENT_ID to supply a stable application
+deployment ID; otherwise the tfvars filename is used.
 EOF
 }
 
@@ -28,45 +38,303 @@ cloud_root() {
   esac
 }
 
+absolute_file() {
+  local file="$1"
+  [[ -f "$file" ]] || die "tfvars file not found: $file"
+  printf '%s/%s' "$(cd "$(dirname "$file")" && pwd)" "$(basename "$file")"
+}
+
 tfvar_string() {
   local file="$1" key="$2"
   awk -F= -v key="$key" '$1 ~ "^[[:space:]]*" key "[[:space:]]*$" { value=$2; gsub(/[[:space:]\"]/, "", value); print value; exit }' "$file"
 }
 
-auth() {
+file_sha256() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+stdin_sha256() {
+  shasum -a 256 | awk '{print $1}'
+}
+
+configuration_sha256() {
+  local cloud="$1" file hash
+  (
+    cd "$ROOT"
+    {
+      for file in infra components.json; do
+        hash="$(file_sha256 "$file")"
+        printf '%s  %s\n' "$hash" "$file"
+      done
+      while IFS= read -r file; do
+        hash="$(file_sha256 "$file")"
+        printf '%s  %s\n' "$hash" "$file"
+      done < <(
+        find "deployments/$cloud" "modules/$cloud" -type f \
+          \( -name '*.tf' -o -name '.terraform.lock.hcl' \) \
+          -not -path '*/.terraform/*' | LC_ALL=C sort
+      )
+    } | stdin_sha256
+  )
+}
+
+deployment_id_for() {
+  local vars="$1" id
+  id="${INFRA_DEPLOYMENT_ID:-$(basename "$vars" .tfvars)}"
+  [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || die "deployment ID must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+  [[ "$id" != "default" ]] || die "deployment ID 'default' is reserved by Terraform"
+  printf '%s' "$id"
+}
+
+prepare_environment() {
   local cloud="$1" vars="$2"
-  [[ -f "$vars" ]] || die "tfvars file not found: $vars"
-  if [[ "$cloud" == "aws" ]]; then
-    local aws_profile db_profile db_workspace_profile
-    aws_profile="$(tfvar_string "$vars" aws_profile)"
-    db_profile="$(tfvar_string "$vars" databricks_profile)"
-    db_workspace_profile="$(tfvar_string "$vars" databricks_workspace_profile)"
-    [[ -n "$aws_profile" ]] || aws_profile="${AWS_PROFILE:-default}"
-    [[ -n "$db_profile" ]] || db_profile="DEFAULT"
-    aws sts get-caller-identity --profile "$aws_profile" >/dev/null || die "AWS session unavailable. Run: aws sso login --profile $aws_profile"
-    databricks account workspaces list --profile "$db_profile" --output json >/dev/null || die "Databricks account session unavailable. Run: databricks auth login --host https://accounts.cloud.databricks.com --profile $db_profile"
-    if [[ -n "$db_workspace_profile" ]]; then
-      databricks current-user me --profile "$db_workspace_profile" --output json >/dev/null || die "Databricks workspace session unavailable. Run: databricks auth login --profile $db_workspace_profile"
-    fi
-    echo "AWS and Databricks profile preflight passed."
+  ENV_CLOUD="$cloud"
+  ENV_VARS="$(absolute_file "$vars")"
+  ENV_DIR="$(cloud_root "$cloud")"
+  ENV_ID="$(deployment_id_for "$ENV_VARS")"
+  ENV_STATE_DIR="$ROOT/.state/$cloud/$ENV_ID"
+  ENV_STATE="$ENV_STATE_DIR/terraform.tfstate"
+  ENV_BINDING="$ENV_STATE_DIR/environment.path"
+  ENV_ARTIFACTS="$ROOT/.artifacts/$cloud/$ENV_ID"
+  ENV_TF_DATA="$ENV_ARTIFACTS/.terraform"
+}
+
+bind_environment() {
+  local existing workspace_link workspace_target
+  mkdir -p "$ENV_STATE_DIR" "$ENV_ARTIFACTS" "$ENV_TF_DATA"
+  workspace_link="$ENV_DIR/terraform.tfstate.d"
+  workspace_target="$ROOT/.state/$ENV_CLOUD"
+  if [[ -L "$workspace_link" ]]; then
+    [[ "$(readlink "$workspace_link")" == "$workspace_target" ]] || die "$workspace_link points to an unexpected state directory"
+  elif [[ -e "$workspace_link" ]]; then
+    die "$workspace_link already exists and is not managed by ./infra"
   else
-    local subscription
+    ln -s "$workspace_target" "$workspace_link"
+  fi
+  if [[ -f "$ENV_BINDING" ]]; then
+    existing="$(cat "$ENV_BINDING")"
+    [[ "$existing" == "$ENV_VARS" ]] || die "deployment ID '$ENV_ID' is already bound to another environment file: $existing"
+  else
+    printf '%s\n' "$ENV_VARS" > "$ENV_BINDING"
+  fi
+}
+
+check_legacy_state() {
+  local legacy_state="$ENV_DIR/terraform.tfstate"
+  local legacy_plan_path="$ROOT/.artifacts/$ENV_CLOUD/terraform.tfplan.tfvars.path"
+  [[ -f "$legacy_state" && ! -f "$ENV_STATE" ]] || return 0
+
+  if [[ ! -f "$legacy_plan_path" || "$(cat "$legacy_plan_path")" == "$ENV_VARS" ]]; then
+    die "legacy state exists at $legacy_state. Migrate it explicitly with: ./infra state-migrate $ENV_CLOUD $ENV_VARS --confirm migrate-$ENV_CLOUD-$ENV_ID"
+  fi
+}
+
+acquire_operation_lock() {
+  OPERATION_LOCK="$ENV_ARTIFACTS/.operation.lock"
+  mkdir -p "$ENV_ARTIFACTS"
+  mkdir "$OPERATION_LOCK" 2>/dev/null || die "another operation is already running for deployment '$ENV_ID'"
+  trap 'release_operation_lock' EXIT INT TERM
+}
+
+release_operation_lock() {
+  if [[ -n "${OPERATION_LOCK:-}" && -d "$OPERATION_LOCK" ]]; then
+    rmdir "$OPERATION_LOCK"
+  fi
+  OPERATION_LOCK=""
+}
+
+terraform_for_environment() {
+  TF_DATA_DIR="$ENV_TF_DATA" TF_WORKSPACE="$ENV_ID" terraform -chdir="$ENV_DIR" "$@"
+}
+
+aws_cli() {
+  if [[ -n "${AUTH_AWS_PROFILE:-}" ]]; then
+    aws "$@" --profile "$AUTH_AWS_PROFILE"
+  else
+    aws "$@"
+  fi
+}
+
+preflight() {
+  local cloud="$1" vars="$2"
+  local aws_identity aws_account_id db_account_id subscription azure_identity
+  cloud_root "$cloud" >/dev/null
+  AUTH_TF_ARGS=()
+  AUTH_AWS_PROFILE=""
+
+  if [[ "$cloud" == "aws" ]]; then
+    AUTH_AWS_PROFILE="${AWS_PROFILE:-$(tfvar_string "$vars" aws_profile)}"
+    AUTH_DB_ACCOUNT_PROFILE="${DATABRICKS_ACCOUNT_PROFILE:-${DATABRICKS_CONFIG_PROFILE:-$(tfvar_string "$vars" databricks_profile)}}"
+    AUTH_DB_WORKSPACE_PROFILE="${DATABRICKS_WORKSPACE_PROFILE:-$(tfvar_string "$vars" databricks_workspace_profile)}"
+    db_account_id="$(tfvar_string "$vars" databricks_account_id)"
+    [[ -n "$db_account_id" ]] || die "databricks_account_id is required in $vars"
+
+    aws_identity="$(aws_cli sts get-caller-identity --output json)" || die "AWS session unavailable. For local use, run: aws sso login --profile <profile>"
+    aws_account_id="$(printf '%s' "$aws_identity" | jq -r '.Account // empty')"
+    [[ -n "$aws_account_id" ]] || die "could not determine the authenticated AWS account"
+
+    if [[ -n "$AUTH_DB_ACCOUNT_PROFILE" ]]; then
+      databricks account workspaces list --profile "$AUTH_DB_ACCOUNT_PROFILE" --output json >/dev/null || die "Databricks account session unavailable. Run: databricks auth login https://accounts.cloud.databricks.com --account-id $db_account_id --profile $AUTH_DB_ACCOUNT_PROFILE"
+      AUTH_TF_ARGS+=("-var=databricks_profile=$AUTH_DB_ACCOUNT_PROFILE")
+    else
+      DATABRICKS_HOST="https://accounts.cloud.databricks.com" DATABRICKS_ACCOUNT_ID="$db_account_id" \
+        databricks account workspaces list --output json >/dev/null || die "Databricks account authentication unavailable. Configure OAuth M2M/workload identity environment variables or a local account profile."
+    fi
+
+    if [[ -n "$AUTH_DB_WORKSPACE_PROFILE" ]]; then
+      databricks current-user me --profile "$AUTH_DB_WORKSPACE_PROFILE" --output json >/dev/null || die "Databricks workspace session unavailable. Run: databricks auth login <workspace-url> --profile $AUTH_DB_WORKSPACE_PROFILE"
+      AUTH_TF_ARGS+=("-var=databricks_workspace_profile=$AUTH_DB_WORKSPACE_PROFILE")
+    fi
+    if [[ -n "$AUTH_AWS_PROFILE" ]]; then
+      AUTH_TF_ARGS+=("-var=aws_profile=$AUTH_AWS_PROFILE")
+    fi
+
+    AUTH_CONTEXT_SHA="$(printf 'cloud=aws\naws_account=%s\naws_profile=%s\ndatabricks_account=%s\ndatabricks_account_profile=%s\ndatabricks_workspace_profile=%s\n' \
+      "$aws_account_id" "$AUTH_AWS_PROFILE" "$db_account_id" "$AUTH_DB_ACCOUNT_PROFILE" "$AUTH_DB_WORKSPACE_PROFILE" | stdin_sha256)"
+    echo "AWS and Databricks authentication preflight passed."
+  else
     subscription="$(tfvar_string "$vars" subscription_id)"
-    az account show >/dev/null || die "Azure session unavailable. Run: az login"
     [[ -n "$subscription" ]] || die "subscription_id is required in $vars"
-    az account set --subscription "$subscription"
+    azure_identity="$(az account show --subscription "$subscription" --output json)" || die "Azure session unavailable. Run: az login"
+    AUTH_CONTEXT_SHA="$(printf '%s' "$azure_identity" | jq -r '[.id, .tenantId, .user.type] | @tsv' | stdin_sha256)"
     echo "Azure authentication preflight passed."
   fi
+}
+
+write_plan_metadata() {
+  local metadata="$1" action="$2" plan="${1%.metadata}"
+  {
+    printf 'version=1\n'
+    printf 'action=%s\n' "$action"
+    printf 'cloud=%s\n' "$ENV_CLOUD"
+    printf 'deployment_id=%s\n' "$ENV_ID"
+    printf 'tfvars_path=%s\n' "$ENV_VARS"
+    printf 'tfvars_sha256=%s\n' "$(file_sha256 "$ENV_VARS")"
+    printf 'plan_sha256=%s\n' "$(file_sha256 "$plan")"
+    printf 'configuration_sha256=%s\n' "$(configuration_sha256 "$ENV_CLOUD")"
+    printf 'auth_context_sha256=%s\n' "$AUTH_CONTEXT_SHA"
+    printf 'state_path=%s\n' "$ENV_STATE"
+  } > "$metadata"
+}
+
+metadata_value() {
+  local metadata="$1" key="$2"
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$metadata"
+}
+
+verify_plan_metadata() {
+  local metadata="$1" action="$2"
+  [[ -f "$metadata" ]] || die "saved plan metadata is missing; create a new plan"
+  [[ "$(metadata_value "$metadata" version)" == "1" ]] || die "unsupported saved plan metadata; create a new plan"
+  [[ "$(metadata_value "$metadata" action)" == "$action" ]] || die "saved plan action does not match '$action'"
+  [[ "$(metadata_value "$metadata" cloud)" == "$ENV_CLOUD" ]] || die "saved plan cloud does not match"
+  [[ "$(metadata_value "$metadata" deployment_id)" == "$ENV_ID" ]] || die "saved plan deployment ID does not match"
+  [[ "$(metadata_value "$metadata" tfvars_path)" == "$ENV_VARS" ]] || die "saved plan belongs to another environment file"
+  [[ "$(metadata_value "$metadata" tfvars_sha256)" == "$(file_sha256 "$ENV_VARS")" ]] || die "tfvars changed after the saved plan; create a new plan"
+  [[ "$(metadata_value "$metadata" plan_sha256)" == "$(file_sha256 "${metadata%.metadata}")" ]] || die "saved plan changed after it was created; create a new plan"
+  [[ "$(metadata_value "$metadata" configuration_sha256)" == "$(configuration_sha256 "$ENV_CLOUD")" ]] || die "Terraform configuration changed after the saved plan; create a new plan"
+  [[ "$(metadata_value "$metadata" auth_context_sha256)" == "$AUTH_CONTEXT_SHA" ]] || die "authenticated cloud account or profile selection changed after the saved plan; create a new plan"
+  [[ "$(metadata_value "$metadata" state_path)" == "$ENV_STATE" ]] || die "saved plan belongs to another state file"
+}
+
+show_plan_summary() {
+  local plan="$1" summary
+  summary="$(terraform_for_environment show -json "$plan" | jq -r '
+    [.resource_changes[]?.change.actions] as $a |
+    "create=\($a | map(select(. == ["create"])) | length) " +
+    "update=\($a | map(select(. == ["update"])) | length) " +
+    "replace=\($a | map(select((index("create") != null) and (index("delete") != null))) | length) " +
+    "delete=\($a | map(select(. == ["delete"])) | length)"
+  ')"
+  printf 'Saved plan summary: %s\n' "$summary"
+}
+
+create_plan() {
+  local cloud="$1" vars="$2" action="$3" plan metadata
+  prepare_environment "$cloud" "$vars"
+  check_legacy_state
+  bind_environment
+  acquire_operation_lock
+  preflight "$cloud" "$ENV_VARS"
+
+  if [[ "$action" == "apply" ]]; then
+    plan="$ENV_ARTIFACTS/apply.tfplan"
+  else
+    plan="$ENV_ARTIFACTS/destroy.tfplan"
+  fi
+  metadata="$plan.metadata"
+
+  terraform_for_environment init -backend=false -lockfile=readonly
+  if [[ "$action" == "apply" ]]; then
+    terraform_for_environment plan -var-file="$ENV_VARS" "${AUTH_TF_ARGS[@]}" -out="$plan"
+  else
+    terraform_for_environment plan -destroy -var-file="$ENV_VARS" "${AUTH_TF_ARGS[@]}" -out="$plan"
+  fi
+  write_plan_metadata "$metadata" "$action"
+  rm -f "$plan.applied"
+  show_plan_summary "$plan"
+  echo "Saved plan: $plan"
+}
+
+apply_plan() {
+  local cloud="$1" vars="$2" action="$3" plan metadata
+  prepare_environment "$cloud" "$vars"
+  check_legacy_state
+  bind_environment
+  acquire_operation_lock
+  preflight "$cloud" "$ENV_VARS"
+
+  if [[ "$action" == "apply" ]]; then
+    plan="$ENV_ARTIFACTS/apply.tfplan"
+  else
+    plan="$ENV_ARTIFACTS/destroy.tfplan"
+  fi
+  metadata="$plan.metadata"
+  [[ -f "$plan" ]] || die "no saved $action plan for deployment '$ENV_ID'; create one first"
+  [[ ! -f "$plan.applied" ]] || die "this saved plan was already applied; create a new plan"
+  terraform_for_environment init -backend=false -lockfile=readonly
+  verify_plan_metadata "$metadata" "$action"
+  show_plan_summary "$plan"
+  terraform_for_environment apply "$plan"
+  date -u +'%Y-%m-%dT%H:%M:%SZ' > "$plan.applied"
+}
+
+migrate_state() {
+  local cloud="$1" vars="$2" confirmation="$3"
+  local legacy_state legacy_backup legacy_plan_path expected
+  prepare_environment "$cloud" "$vars"
+  legacy_state="$ENV_DIR/terraform.tfstate"
+  legacy_backup="$ENV_DIR/terraform.tfstate.backup"
+  legacy_plan_path="$ROOT/.artifacts/$cloud/terraform.tfplan.tfvars.path"
+  expected="migrate-$cloud-$ENV_ID"
+
+  [[ "$confirmation" == "$expected" ]] || die "state migration requires: --confirm $expected"
+  [[ -f "$legacy_state" ]] || die "no legacy state found at $legacy_state"
+  [[ ! -e "$ENV_STATE" ]] || die "destination state already exists: $ENV_STATE"
+  if [[ -f "$legacy_plan_path" ]]; then
+    [[ "$(cat "$legacy_plan_path")" == "$ENV_VARS" ]] || die "legacy plan metadata associates the state with another environment file"
+  fi
+
+  bind_environment
+  mv "$legacy_state" "$ENV_STATE"
+  if [[ -f "$legacy_backup" ]]; then
+    mv "$legacy_backup" "$ENV_STATE.backup"
+  fi
+  echo "Migrated local state to: $ENV_STATE"
+  echo "Create and review a new saved plan before the next apply or destroy."
 }
 
 command="${1:-}"
 case "$command" in
   list)
+    [[ $# -eq 1 ]] || { usage; exit 2; }
     jq . "$ROOT/components.json"
     ;;
-  auth)
+  doctor|auth)
     [[ $# -eq 3 ]] || { usage; exit 2; }
-    auth "$2" "$3"
+    [[ "$command" != "auth" ]] || echo "WARNING: './infra auth' is deprecated; use './infra doctor'." >&2
+    vars="$(absolute_file "$3")"
+    preflight "$2" "$vars"
     ;;
   validate)
     [[ $# -eq 2 ]] || { usage; exit 2; }
@@ -74,64 +342,48 @@ case "$command" in
     ;;
   plan)
     [[ $# -eq 3 ]] || { usage; exit 2; }
-    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"
-    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
-    auth "$cloud" "$vars"
-    mkdir -p "$ROOT/.artifacts/$cloud"
-    plan="$ROOT/.artifacts/$cloud/terraform.tfplan"
-    terraform -chdir="$dir" init
-    terraform -chdir="$dir" plan -var-file="$vars" -out="$plan"
-    shasum -a 256 "$vars" | awk '{print $1}' > "$plan.tfvars.sha256"
-    printf '%s\n' "$vars" > "$plan.tfvars.path"
-    echo "Saved plan: $plan"
+    create_plan "$2" "$3" apply
     ;;
   apply)
     [[ $# -eq 3 ]] || { usage; exit 2; }
-    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"; plan="$ROOT/.artifacts/$cloud/terraform.tfplan"
-    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
-    [[ -f "$plan" && -f "$plan.tfvars.sha256" ]] || die "no saved plan; run ./infra plan first"
-    expected="$(cat "$plan.tfvars.sha256")"; actual="$(shasum -a 256 "$vars" | awk '{print $1}')"
-    [[ "$actual" == "$expected" ]] || die "tfvars changed after the saved plan; create a new plan"
-    auth "$cloud" "$vars"
-    terraform -chdir="$dir" apply "$plan"
+    apply_plan "$2" "$3" apply
     ;;
   output)
-    [[ $# -eq 2 ]] || { usage; exit 2; }
-    terraform -chdir="$(cloud_root "$2")" output
+    [[ $# -eq 3 ]] || { usage; exit 2; }
+    prepare_environment "$2" "$3"
+    check_legacy_state
+    bind_environment
+    [[ -f "$ENV_STATE" ]] || die "state not found for deployment '$ENV_ID'"
+    terraform_for_environment output
     ;;
   destroy-plan)
     [[ $# -eq 3 ]] || { usage; exit 2; }
-    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"
-    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
-    auth "$cloud" "$vars"
-    mkdir -p "$ROOT/.artifacts/$cloud"
-    plan="$ROOT/.artifacts/$cloud/destroy.tfplan"
-    terraform -chdir="$dir" init
-    terraform -chdir="$dir" plan -destroy -var-file="$vars" -out="$plan"
-    shasum -a 256 "$vars" | awk '{print $1}' > "$plan.tfvars.sha256"
-    printf '%s\n' "$vars" > "$plan.tfvars.path"
-    echo "Saved destroy plan: $plan"
+    create_plan "$2" "$3" destroy
     ;;
   destroy)
     [[ $# -eq 5 && "$4" == "--confirm" && "$5" == "destroy-$2" ]] || die "destroy requires: --confirm destroy-<cloud>"
-    cloud="$2"; vars="$3"; dir="$(cloud_root "$cloud")"; plan="$ROOT/.artifacts/$cloud/destroy.tfplan"
-    vars="$(cd "$(dirname "$vars")" && pwd)/$(basename "$vars")"
-    [[ -f "$plan" && -f "$plan.tfvars.sha256" && -f "$plan.tfvars.path" ]] || die "no saved destroy plan; run ./infra destroy-plan first"
-    expected="$(cat "$plan.tfvars.sha256")"; actual="$(shasum -a 256 "$vars" | awk '{print $1}')"
-    expected_path="$(cat "$plan.tfvars.path")"
-    [[ "$actual" == "$expected" && "$vars" == "$expected_path" ]] || die "tfvars changed after the saved destroy plan; create a new destroy plan"
-    auth "$cloud" "$vars"
-    terraform -chdir="$dir" apply "$plan"
+    apply_plan "$2" "$3" destroy
+    ;;
+  state-migrate)
+    [[ $# -eq 5 && "$4" == "--confirm" ]] || die "state migration requires an environment-specific confirmation; see ./infra usage"
+    migrate_state "$2" "$3" "$5"
     ;;
   endpoints)
     [[ "${2:-}" == "aws" ]] || die "endpoint operations currently support aws only"
     case "${3:-}" in
       status)
-        terraform -chdir="$ROOT/deployments/aws" output -json | jq '{connectivity: .connectivity.value, ncc_rules: .ncc_rules.value}'
+        [[ $# -eq 4 ]] || { usage; exit 2; }
+        prepare_environment aws "$4"
+        check_legacy_state
+        bind_environment
+        [[ -f "$ENV_STATE" ]] || die "state not found for deployment '$ENV_ID'"
+        terraform_for_environment output -json | jq '{connectivity: .connectivity.value, ncc_rules: .ncc_rules.value}'
         ;;
       accept)
-        [[ "${4:-}" == "--service-id" && "${6:-}" == "--endpoint-id" && -n "${5:-}" && -n "${7:-}" ]] || die "accept requires --service-id and --endpoint-id"
-        aws ec2 accept-vpc-endpoint-connections --service-id "$5" --vpc-endpoint-ids "$7"
+        [[ $# -eq 8 && "${5:-}" == "--service-id" && "${7:-}" == "--endpoint-id" && -n "${6:-}" && -n "${8:-}" ]] || die "accept requires: <environment.tfvars> --service-id <id> --endpoint-id <id>"
+        vars="$(absolute_file "$4")"
+        preflight aws "$vars"
+        aws_cli ec2 accept-vpc-endpoint-connections --service-id "$6" --vpc-endpoint-ids "$8"
         ;;
       *) usage; exit 2 ;;
     esac

@@ -14,6 +14,11 @@ mock_provider "aws" {
       partition = "aws"
     }
   }
+  mock_data "aws_ami" {
+    defaults = {
+      id = "ami-0123456789abcdef0"
+    }
+  }
   mock_data "aws_network_interface" {
     defaults = {
       private_ip = "10.45.1.10"
@@ -260,4 +265,149 @@ run "reject_connectivity_for_disabled_service" {
     }
   }
   expect_failures = [var.connectivity]
+}
+
+run "standalone_simulated_on_prem" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = false
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+  }
+  assert {
+    condition     = output.workspace_url == null
+    error_message = "A standalone simulated network must not create a Databricks workspace."
+  }
+  assert {
+    condition     = output.connectivity.simulated_on_prem.classic.mode == "none" && output.connectivity.simulated_on_prem.classic.transit_gateway_id == null
+    error_message = "A standalone simulated network must not create Transit Gateway connectivity."
+  }
+}
+
+run "workspace_and_simulated_on_prem_disconnected" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        classic = "none"
+      }
+    }
+  }
+  assert {
+    condition     = output.connectivity.simulated_on_prem.classic.mode == "none" && output.connectivity.simulated_on_prem.classic.transit_gateway_id == null
+    error_message = "Disconnected mode must not create Transit Gateway connectivity."
+  }
+}
+
+run "workspace_to_simulated_on_prem_transit_gateway" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        classic = "transit_gateway"
+      }
+    }
+  }
+  assert {
+    condition     = output.connectivity.simulated_on_prem.classic.mode == "transit_gateway"
+    error_message = "Classic compute must use Transit Gateway for the connected simulated network."
+  }
+}
+
+run "reject_simulated_on_prem_connectivity_without_workspace" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = false
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        classic = "transit_gateway"
+      }
+    }
+  }
+  expect_failures = [var.connectivity]
+}
+
+run "reject_simulated_on_prem_connectivity_when_disabled" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = false
+    }
+    connectivity = {
+      simulated_on_prem = {
+        classic = "transit_gateway"
+      }
+    }
+  }
+  expect_failures = [var.connectivity]
+}
+
+run "reject_overlapping_workspace_and_simulated_on_prem_cidrs" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        classic = "transit_gateway"
+      }
+    }
+    simulated_on_prem = {
+      vpc_cidr                    = "10.40.0.0/16"
+      workload_subnet_cidr        = "10.40.64.0/24"
+      tgw_attachment_subnet_cidrs = ["10.40.65.0/28", "10.40.65.16/28"]
+    }
+  }
+  expect_failures = [terraform_data.simulated_on_prem_network_validation[0]]
+}
+
+run "reject_invalid_workspace_tgw_attachment_subnet_count" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = true
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+    connectivity = {
+      simulated_on_prem = {
+        classic = "transit_gateway"
+      }
+    }
+    workspace_network = {
+      vpc_cidr                    = "10.40.0.0/18"
+      private_subnet_cidrs        = ["10.40.0.0/20", "10.40.16.0/20"]
+      public_subnet_cidr          = "10.40.32.0/24"
+      tgw_attachment_subnet_cidrs = ["10.40.33.0/28"]
+    }
+  }
+  expect_failures = [var.workspace_network]
 }

@@ -1,6 +1,6 @@
 # STS infrastructure labs
 
-Modular Terraform for Databricks infrastructure and private-connectivity labs on AWS and Azure. Feature flags select the resources to deploy, while AWS connectivity settings independently control how classic and serverless compute reach each data source.
+Modular Terraform for Databricks infrastructure, private-connectivity labs, and hybrid-network simulations on AWS and Azure. Feature flags select the resources to deploy, while AWS connectivity settings control how compute reaches each target.
 
 ## Available features
 
@@ -15,11 +15,13 @@ Modular Terraform for Databricks infrastructure and private-connectivity labs on
 | `aurora_postgres` | Private Aurora PostgreSQL cluster | Dedicated VPC with writer and reader endpoints |
 | `aurora_proxy` | RDS Proxy for Aurora PostgreSQL | Requires `aurora_postgres`; adds a read-only proxy endpoint |
 | `rabbitmq` | Self-managed RabbitMQ on private EC2 | Dedicated VPC, Secrets Manager credentials, and NAT for bootstrap traffic |
+| `simulated_on_prem` | Private EC2 network representing on-premises | Dedicated VPC, HTTP test host, and private Systems Manager endpoints; no NAT, internet gateway, public IP, or SSH |
 
 Terraform derives two supporting features automatically:
 
 - Classic PrivateLink interface endpoints are created when a data source uses `classic = "private_link"`.
 - One regional Network Connectivity Configuration (NCC) is created and attached to the workspace when any data source uses `serverless = "private_link"`.
+- A Transit Gateway and two VPC attachments are created when simulated on-premises uses `classic = "transit_gateway"`.
 
 ### Azure
 
@@ -40,6 +42,8 @@ Every enabled data source is deployed in its own VPC. Deployment alone does not 
 | Classic | `private_link` | Internal NLB and endpoint service in the data-source VPC, plus an interface endpoint in the workspace VPC |
 | Serverless | `none` | No NCC private endpoint rule |
 | Serverless | `private_link` | Internal NLB and endpoint service, NCC workspace attachment, hostname rule, and a Databricks-managed interface endpoint |
+| Classic to simulated on-premises | `none` | The private test network is deployed without a route to the workspace VPC |
+| Classic to simulated on-premises | `transit_gateway` | Dedicated attachment subnets, TGW attachments and route table, reciprocal VPC routes, and a port-specific security path |
 
 All AWS data sources support the same mode combinations:
 
@@ -49,6 +53,11 @@ All AWS data sources support the same mode combinations:
 | RDS SQL Server | `1433` | `none`, `peering`, `private_link` | `none`, `private_link` |
 | Aurora PostgreSQL | `5432` | `none`, `peering`, `private_link` | `none`, `private_link` |
 | RabbitMQ | `5672` | `none`, `peering`, `private_link` | `none`, `private_link` |
+
+The simulated on-premises network is a classic-compute-only target with modes
+`none` and `transit_gateway`. Serverless compute is outside the workspace VPC and
+therefore cannot use this TGW route; use NCC and PrivateLink for serverless
+private connectivity.
 
 For example, the same PostgreSQL instance can be reached from classic clusters through peering and from serverless compute through NCC and PrivateLink:
 
@@ -72,8 +81,10 @@ Use `none` for both values to deploy a workspace and data source in separate VPC
 PrivateLink endpoint services require explicit endpoint acceptance. Inspect the pending IDs before accepting them:
 
 ```bash
-./infra endpoints aws status
-./infra endpoints aws accept --service-id vpce-svc-... --endpoint-id vpce-...
+./infra endpoints aws status environments/local/my-aws.tfvars
+./infra endpoints aws accept environments/local/my-aws.tfvars \
+  --service-id vpce-svc-... \
+  --endpoint-id vpce-...
 ```
 
 See the [AWS connectivity guide](guides/aws/connectivity.md) for endpoint behavior, TLS considerations, and additional combinations.
@@ -97,6 +108,8 @@ Available examples:
 | `environments/examples/aws/workspace-postgres.tfvars` | AWS workspace, Unity Catalog, and RDS PostgreSQL through classic VPC peering |
 | `environments/examples/aws/workspace-postgres-no-connectivity.tfvars` | AWS workspace and RDS PostgreSQL in separate, disconnected VPCs |
 | `environments/examples/aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
+| `environments/examples/aws/workspace-simulated-on-prem-disconnected.tfvars` | Classic workspace and simulated on-premises VPC without connectivity |
+| `environments/examples/aws/workspace-simulated-on-prem-transit-gateway.tfvars` | Classic workspace connected to a simulated on-premises HTTP service through Transit Gateway |
 | `environments/examples/azure/workspace-sql.tfvars` | Azure VNet-injected workspace and private Azure SQL Database |
 
 For example:
@@ -108,17 +121,25 @@ cp environments/examples/aws/workspace-postgres.tfvars environments/local/my-aws
 
 ## Deploy safely
 
-Authenticate, validate, save a plan, review it, and then apply that exact plan:
+Set local authentication profiles in the shell, validate, save a plan, review
+it, and then apply that exact plan:
 
 ```bash
+export AWS_PROFILE=<aws-profile>
+export DATABRICKS_ACCOUNT_PROFILE=<databricks-account-profile>
+# Set DATABRICKS_WORKSPACE_PROFILE after the workspace exists, if needed.
+
 ./infra list
-./infra auth aws environments/local/my-aws.tfvars
 ./infra validate aws
 ./infra plan aws environments/local/my-aws.tfvars
 ./infra apply aws environments/local/my-aws.tfvars
 ```
 
-`apply` accepts only the saved plan produced for the same cloud and tfvars file. Endpoint acceptance, deployment, and destruction are separate external changes.
+`plan` verifies authentication automatically. Use `./infra doctor aws <tfvars>`
+only when troubleshooting a session. `apply` accepts only the environment's
+saved plan and verifies its cloud account, configuration, tfvars, state, and
+provider lock before applying. Endpoint acceptance, deployment, and destruction
+are separate external changes.
 
 Destruction also requires a saved plan and typed confirmation:
 
@@ -127,10 +148,19 @@ Destruction also requires a saved plan and typed confirmation:
 ./infra destroy aws environments/local/my-aws.tfvars --confirm destroy-aws
 ```
 
-This repository uses local Terraform state only. State, plans, local environment files, credentials, and generated secrets are ignored by Git and must never be committed.
+This repository uses isolated local state under
+`.state/<cloud>/<deployment-id>`. State, plans, local environment files,
+credentials, and generated secrets are ignored by Git and must never be
+committed. Set `INFRA_DEPLOYMENT_ID` when an application needs to provide a
+stable customer/deployment identifier.
 
 ## Documentation
 
-Start at the [guides index](guides/README.md). Tutorials are organized by cloud, compute type, and data source. Cross-cutting references cover [authentication](guides/operations/authentication.md), the [deployment workflow](guides/operations/deployment.md), and [local Terraform state](guides/operations/state.md).
+Start at the [guides index](guides/README.md). Tutorials are organized by cloud,
+compute type, and data source. Cross-cutting references cover
+[authentication](guides/operations/authentication.md), the
+[deployment workflow](guides/operations/deployment.md),
+[local Terraform state](guides/operations/state.md), and the future
+[application integration baseline](guides/operations/application-integration.md).
 
 `components.json` is the machine-readable feature catalog. `AGENTS.md` defines the repository guardrails for infrastructure agents.
