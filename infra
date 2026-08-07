@@ -17,6 +17,7 @@ Usage:
   ./infra state-migrate <aws|azure> <environment.tfvars> --confirm migrate-<cloud>-<deployment-id>
   ./infra endpoints aws status <environment.tfvars>
   ./infra endpoints aws accept <environment.tfvars> --service-id vpce-svc-... --endpoint-id vpce-...
+  ./infra endpoints aws reject <environment.tfvars> --service-id vpce-svc-... --endpoint-id vpce-... --confirm reject-aws-endpoint
 
 Authentication overrides for local operators:
   AWS_PROFILE
@@ -145,6 +146,80 @@ release_operation_lock() {
 
 terraform_for_environment() {
   TF_DATA_DIR="$ENV_TF_DATA" TF_WORKSPACE="$ENV_ID" terraform -chdir="$ENV_DIR" "$@"
+}
+
+databricks_workspace_cli() {
+  local workspace_url="$1"
+  shift
+  if [[ -n "${AUTH_DB_WORKSPACE_PROFILE:-}" ]]; then
+    databricks "$@" --profile "$AUTH_DB_WORKSPACE_PROFILE"
+  else
+    DATABRICKS_HOST="$workspace_url" databricks "$@"
+  fi
+}
+
+terminate_workspace_clusters() {
+  local workspace_output workspace_url clusters_json cluster_rows cluster_ids=""
+  local cluster_id cluster_name remaining_rows deadline_at requested=0
+  workspace_output="$(terraform_for_environment output -json)" ||
+    die "could not read the workspace URL from Terraform state before destroy"
+  workspace_url="$(printf '%s' "$workspace_output" | jq -r '.workspace_url.value // empty')" ||
+    die "could not parse the workspace URL from Terraform state before destroy"
+  if [[ -z "$workspace_url" ]]; then
+    echo "No workspace in state; skipping cluster termination."
+    return 0
+  fi
+
+  databricks_workspace_cli "$workspace_url" current-user me --output json >/dev/null ||
+    die "Databricks workspace authentication is required to terminate clusters before destroy. Set DATABRICKS_WORKSPACE_PROFILE or workspace OAuth environment credentials."
+  clusters_json="$(databricks_workspace_cli "$workspace_url" clusters list --output json)" ||
+    die "could not list Databricks clusters before destroy"
+  cluster_rows="$(printf '%s' "$clusters_json" | jq -r '
+    (if type == "array" then . else (.clusters // []) end)[] |
+    select(.state != "TERMINATED") |
+    [.cluster_id, (.cluster_name // "unnamed")] | @tsv
+  ')" || die "could not parse the Databricks cluster list before destroy"
+
+  while IFS=$'\t' read -r cluster_id cluster_name; do
+    [[ -n "$cluster_id" ]] || continue
+    echo "Requesting Databricks cluster termination: ${cluster_name:-unnamed} ($cluster_id)"
+    databricks_workspace_cli "$workspace_url" clusters delete "$cluster_id" --no-wait ||
+      die "could not request termination for cluster $cluster_id; Terraform destroy was not started"
+    cluster_ids+="$cluster_id"$'\n'
+    requested=$((requested + 1))
+  done <<< "$cluster_rows"
+
+  if [[ "$requested" -eq 0 ]]; then
+    echo "Databricks cluster cleanup complete: no active clusters."
+    return 0
+  fi
+
+  deadline_at=$(($(date +%s) + 1200))
+  while true; do
+    clusters_json="$(databricks_workspace_cli "$workspace_url" clusters list --output json)" ||
+      die "could not check Databricks cluster termination progress"
+    remaining_rows="$(printf '%s' "$clusters_json" | jq -r --arg cluster_ids "$cluster_ids" '
+      ($cluster_ids | split("\n") | map(select(length > 0))) as $targets |
+      (if type == "array" then . else (.clusters // []) end)[] |
+      select(.cluster_id as $id | $targets | index($id)) |
+      select(.state != "TERMINATED") |
+      [.cluster_id, (.cluster_name // "unnamed"), .state] | @tsv
+    ')" || die "could not parse Databricks cluster termination progress"
+
+    if [[ -z "$remaining_rows" ]]; then
+      echo "Databricks cluster cleanup complete: $requested cluster(s) terminated."
+      return 0
+    fi
+    if [[ "$(date +%s)" -ge "$deadline_at" ]]; then
+      echo "Clusters still active after the shared 20-minute cleanup deadline:" >&2
+      printf '%s\n' "$remaining_rows" >&2
+      die "Databricks clusters did not terminate; Terraform destroy was not started"
+    fi
+
+    echo "Waiting for Databricks clusters to terminate:"
+    printf '%s\n' "$remaining_rows"
+    sleep 10
+  done
 }
 
 aws_cli() {
@@ -295,6 +370,9 @@ apply_plan() {
   terraform_for_environment init -backend=false -lockfile=readonly
   verify_plan_metadata "$metadata" "$action"
   show_plan_summary "$plan"
+  if [[ "$action" == "destroy" && "$cloud" == "aws" ]]; then
+    terminate_workspace_clusters
+  fi
   terraform_for_environment apply "$plan"
   date -u +'%Y-%m-%dT%H:%M:%SZ' > "$plan.applied"
 }
@@ -384,6 +462,12 @@ case "$command" in
         vars="$(absolute_file "$4")"
         preflight aws "$vars"
         aws_cli ec2 accept-vpc-endpoint-connections --service-id "$6" --vpc-endpoint-ids "$8"
+        ;;
+      reject)
+        [[ $# -eq 10 && "${5:-}" == "--service-id" && "${7:-}" == "--endpoint-id" && "${9:-}" == "--confirm" && "${10:-}" == "reject-aws-endpoint" && -n "${6:-}" && -n "${8:-}" ]] || die "reject requires: <environment.tfvars> --service-id <id> --endpoint-id <id> --confirm reject-aws-endpoint"
+        vars="$(absolute_file "$4")"
+        preflight aws "$vars"
+        aws_cli ec2 reject-vpc-endpoint-connections --service-id "$6" --vpc-endpoint-ids "$8"
         ;;
       *) usage; exit 2 ;;
     esac
