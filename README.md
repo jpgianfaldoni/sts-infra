@@ -1,80 +1,112 @@
-# STS infrastructure labs
+# Build your Databricks infrastructure scenario
 
-Modular Terraform for Databricks infrastructure, private-connectivity labs, and hybrid-network simulations on AWS and Azure. Feature flags select the resources to deploy, while AWS connectivity settings control how compute reaches each target.
+This project creates disposable, customizable Databricks environments for
+learning, testing, and demonstrations. Choose the cloud resources and
+network paths you need, then deploy the complete scenario with Terraform.
 
-## Available features
+## Why this project exists
+
+Many Databricks scenarios require more than configuring a workspace. They also
+require networking between different compute types and private data
+sources, for example:
+
+- classic compute connecting to a database in the same cloud environment;
+- serverless compute connecting to a private cloud resource;
+- classic or serverless compute connecting to an on-premises network;
+- Lakeflow Connect using CDC or query-based ingestion over one of those paths;
+- workspace setup and migration from classic to serverless compute.
+
+These scenarios are difficult to study or demonstrate without access to an
+environment that resembles the target architecture. Building one manually
+is slow, inconsistent, and easy to get wrong. Reusing an existing environment
+can also hide important setup steps or create conflicts between exercises.
+
+## The solution
+
+This repository is a **build-your-own-scenario** toolkit. Its modular Terraform
+creates the Databricks workspace, source systems, cloud networking, and private
+connectivity needed to reproduce the desired architecture in a disposable lab.
+
+An environment file answers three questions:
+
+1. Which cloud should host the lab?
+2. Which resources should be created?
+3. How should Databricks compute reach each resource?
+
+Feature flags enable resources such as PostgreSQL, SQL Server, RabbitMQ, and a
+simulated on-premises network. Connectivity settings independently select the
+path for classic and serverless compute. Supporting resources such as VPC
+peering, load balancers, endpoint services, Network Connectivity
+Configurations (NCCs), private endpoints, or Transit Gateway are derived from
+those choices.
+
+Terraform provisions the infrastructure and network path. Some
+application-level steps—such as enabling database CDC, creating source objects,
+or creating the Lakeflow connection and pipeline—are completed afterward using
+the supplied assets and guides.
+
+## Example scenarios
+
+| Goal | Example deployment result |
+| --- | --- |
+| Demonstrate Lakeflow Connect SQL Server CDC on AWS | Databricks workspace + private RDS SQL Server + classic VPC peering; use the supplied SQL seed asset to finish the CDC setup |
+| Train on serverless connectivity to PostgreSQL on AWS | Databricks workspace + private RDS PostgreSQL + internal NLB + endpoint service + NCC private endpoint |
+| Demonstrate Lakeflow Connect PostgreSQL query-based ingestion on AWS | Databricks workspace + private PostgreSQL + selected classic or serverless network path; create the connection and pipeline after deployment |
+| Reproduce classic access to an on-premises service | Databricks workspace + isolated test-host VPC + Transit Gateway, attachments, routes, and security rules |
+| Compare classic and serverless access to the same private service | Classic path through peering or Transit Gateway plus a separate serverless path through PrivateLink and an NCC |
+| Practice Azure serverless Private Link | VNet-injected Azure Databricks workspace + private Azure SQL; follow the guide to add the NCC-managed serverless endpoint |
+
+## What can be deployed
 
 ### AWS
 
-| Feature flag | Deploys | Notes |
-| --- | --- | --- |
-| `workspace` | Databricks workspace in a customer-managed VPC | Private subnets, no public IPs on classic compute, NAT egress, root S3 bucket, cross-account IAM, and an S3 gateway endpoint |
-| `unity_catalog` | Unity Catalog metastore and initial catalog | Requires `workspace`; includes an S3 storage root, IAM role, storage credential, and external location |
-| `rds_postgres` | Private Amazon RDS for PostgreSQL | Dedicated VPC; RDS manages the master password in AWS Secrets Manager |
-| `rds_sql_server` | Private Amazon RDS for SQL Server | Dedicated VPC; suitable for SQL Server and Lakeflow Connect demonstrations |
-| `aurora_postgres` | Private Aurora PostgreSQL cluster | Dedicated VPC with writer and reader endpoints |
-| `aurora_proxy` | RDS Proxy for Aurora PostgreSQL | Requires `aurora_postgres`; adds a read-only proxy endpoint |
-| `rabbitmq` | Self-managed RabbitMQ on private EC2 | Dedicated VPC, Secrets Manager credentials, and NAT for bootstrap traffic |
-| `simulated_on_prem` | Private EC2 network representing on-premises | Dedicated VPC, HTTP test host, and private Systems Manager endpoints; no NAT, internet gateway, public IP, or SSH |
+| Component | What it creates |
+| --- | --- |
+| `workspace` | Databricks workspace in a dedicated VPC, private classic-compute subnets, NAT, root S3 storage, and cross-account IAM |
+| `unity_catalog` | Unity Catalog metastore, storage root, storage credential, external location, and initial catalog |
+| `rds_postgres` | Private Amazon RDS for PostgreSQL |
+| `rds_sql_server` | Private Amazon RDS for SQL Server, suitable for Lakeflow Connect CDC labs |
+| `aurora_postgres` | Private Aurora PostgreSQL cluster with writer and reader endpoints |
+| `aurora_proxy` | RDS Proxy for Aurora PostgreSQL |
+| `rabbitmq` | Private self-managed RabbitMQ on EC2 |
+| `simulated_on_prem` | Isolated private network and HTTP test host representing an on-premises environment |
 
-Terraform derives two supporting features automatically:
+AWS data sources are created in dedicated VPCs. Enabling a source does not
+implicitly connect it to Databricks.
 
-- Classic PrivateLink interface endpoints are created when a data source uses `classic = "private_link"`.
-- One regional Network Connectivity Configuration (NCC) is created and attached to the workspace when any data source uses `serverless = "private_link"`.
-- A Transit Gateway and two VPC attachments are created when simulated on-premises uses `classic = "transit_gateway"`.
+| Compute | Connectivity choices |
+| --- | --- |
+| Classic to cloud data sources | `none`, `peering`, `private_link` |
+| Serverless to cloud data sources | `none`, `private_link` |
+| Classic to simulated on-premises | `none`, `transit_gateway` |
+| Serverless to simulated on-premises | `none`, `private_link` |
 
 ### Azure
 
-| Feature flag | Deploys | Notes |
-| --- | --- | --- |
-| `workspace` | Premium VNet-injected Azure Databricks workspace | Delegated host/container subnets, secure cluster connectivity, NAT egress, and a back-end private endpoint; public workspace access remains enabled |
-| `sql_database` | Private Azure SQL logical server and database | Public database access disabled; includes a private endpoint and private DNS zone |
-| `sql_server_vm` | Private SQL Server 2022 VM | Includes a dedicated VNet, NAT, NSG, and a subnet prepared for an Azure Private Link Service; the load balancer and Private Link Service are completed as a tutorial exercise |
+| Component | What it creates |
+| --- | --- |
+| `workspace` | Premium VNet-injected Azure Databricks workspace with secure cluster connectivity, NAT, and a back-end private endpoint |
+| `sql_database` | Private Azure SQL logical server and database with a private endpoint and private DNS |
+| `sql_server_vm` | Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise |
 
-## AWS networking options
+Azure components currently deploy the base resources independently. Follow the
+[Azure serverless SQL guide](guides/azure/serverless/sql-database/private-link.md)
+to configure the NCC and serverless Private Link path.
 
-Every enabled data source is deployed in its own VPC. Deployment alone does not connect it to Databricks. Select classic and serverless connectivity independently for each source:
+## Customize a scenario
 
-| Compute type | Mode | Network path created |
-| --- | --- | --- |
-| Classic | `none` | No route between the workspace VPC and data-source VPC |
-| Classic | `peering` | VPC peering, routes in both VPCs, and port-specific security-group rules |
-| Classic | `private_link` | Internal NLB and endpoint service in the data-source VPC, plus an interface endpoint in the workspace VPC |
-| Serverless | `none` | No NCC private endpoint rule |
-| Serverless | `private_link` | Internal NLB and endpoint service, NCC workspace attachment, hostname rule, and a Databricks-managed interface endpoint |
-| Classic to simulated on-premises | `none` | The private test network is deployed without a route to the workspace VPC |
-| Classic to simulated on-premises | `transit_gateway` | Dedicated attachment subnets, TGW attachments and route table, reciprocal VPC routes, and a port-specific security path |
-| Serverless to simulated on-premises | `none` | No NCC private endpoint rule to the on-premises host |
-| Serverless to simulated on-premises | `private_link` | Internal NLB and endpoint service in front of the host, NCC workspace attachment, hostname rule, and a Databricks-managed interface endpoint |
+Copy the closest template from `environments/examples` into the Git-ignored
+`environments/local` directory. Do not edit the example files directly.
 
-All AWS data sources support the same mode combinations:
+```bash
+mkdir -p environments/local
+cp environments/examples/aws/workspace-postgres.tfvars \
+  environments/local/my-scenario.tfvars
+```
 
-| Data source | Port | Classic modes | Serverless modes |
-| --- | ---: | --- | --- |
-| RDS PostgreSQL | `5432` | `none`, `peering`, `private_link` | `none`, `private_link` |
-| RDS SQL Server | `1433` | `none`, `peering`, `private_link` | `none`, `private_link` |
-| Aurora PostgreSQL | `5432` | `none`, `peering`, `private_link` | `none`, `private_link` |
-| RabbitMQ | `5672` | `none`, `peering`, `private_link` | `none`, `private_link` |
-
-The simulated on-premises network supports classic modes `none` and
-`transit_gateway`, and serverless modes `none` and `private_link`. Serverless
-compute is outside the workspace VPC and therefore cannot use the TGW route; the
-`private_link` serverless mode fronts the private host with an internal NLB and
-VPC endpoint service, then attaches it to the workspace through an NCC private
-endpoint. Classic Transit Gateway and serverless PrivateLink can be enabled
-together against the same host.
-
-The two paths are reached with different addresses. Classic compute over
-Transit Gateway connects to the host's private IP (for example
-`http://10.60.0.252:8080/health`, shown in the `simulated_on_prem.service_url`
-output). Serverless compute has no route to that RFC1918 address and must use
-the endpoint service's DNS name — the NLB hostname reported in the
-`connectivity.simulated_on_prem.serverless.host` output
-(`http://<name>.elb.<region>.amazonaws.com:8080/health`) — which the NCC private
-endpoint rule binds by domain name. Using the private IP from serverless
-compute fails with `No route to host`.
-
-For example, the same PostgreSQL instance can be reached from classic clusters through peering and from serverless compute through NCC and PrivateLink:
+Then select the components and connectivity in the local file. This example
+creates one PostgreSQL instance that classic compute reaches through VPC
+peering and serverless compute reaches through an NCC private endpoint:
 
 ```hcl
 features = {
@@ -91,105 +123,83 @@ connectivity = {
 }
 ```
 
-Use `none` for both values to deploy a workspace and data source in separate VPCs with no network path between them. A data source can also be deployed without a workspace when its connectivity modes are both `none`.
+Set both modes to `none` when you want the workspace and database to remain
+disconnected for a networking exercise. On AWS, setting `region` is normally
+enough; the deployment derives two available zones unless you provide them
+explicitly.
 
-PrivateLink endpoint services require explicit endpoint acceptance. Inspect the pending IDs before accepting them:
+Available templates include:
 
-```bash
-./infra endpoints aws status environments/local/my-aws.tfvars
-./infra endpoints aws accept environments/local/my-aws.tfvars \
-  --service-id vpce-svc-... \
-  --endpoint-id vpce-...
-```
-
-See the [AWS connectivity guide](guides/aws/connectivity.md) for endpoint behavior, TLS considerations, and additional combinations.
-
-## Azure networking
-
-Azure feature flags currently deploy the base resources independently; there is no Azure `connectivity` map yet.
-
-- The workspace uses VNet injection for classic compute and includes its Databricks back-end private endpoint.
-- Azure SQL Database uses its own VNet, private endpoint, and `privatelink.database.windows.net` private DNS zone.
-- Serverless access to Azure SQL or SQL Server on a VM is configured with an NCC and Azure Private Link by following the [Azure serverless SQL tutorial](guides/azure/serverless/sql-database/private-link.md).
-
-## Configure an environment
-
-Files under `environments/examples` are templates with placeholder values. Do not edit them in place. Copy the closest example into the Git-ignored `environments/local` directory and replace the placeholders there.
-
-For AWS, setting `region` is sufficient; the deployment derives two available
-zones in that region unless `availability_zones` is explicitly provided.
-
-Available examples:
-
-| Example | Scenario |
+| Template | Scenario |
 | --- | --- |
-| `environments/examples/aws/workspace-postgres.tfvars` | AWS workspace, Unity Catalog, and RDS PostgreSQL through classic VPC peering |
-| `environments/examples/aws/workspace-postgres-no-connectivity.tfvars` | AWS workspace and RDS PostgreSQL in separate, disconnected VPCs |
-| `environments/examples/aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
-| `environments/examples/aws/workspace-simulated-on-prem-disconnected.tfvars` | Classic workspace and simulated on-premises VPC without connectivity |
-| `environments/examples/aws/workspace-simulated-on-prem-transit-gateway.tfvars` | Classic workspace connected to a simulated on-premises HTTP service through Transit Gateway |
-| `environments/examples/aws/workspace-simulated-on-prem-serverless-private-link.tfvars` | Workspace reaching a simulated on-premises HTTP service from serverless compute through PrivateLink and an NCC private endpoint |
-| `environments/examples/azure/workspace-sql.tfvars` | Azure VNet-injected workspace and private Azure SQL Database |
+| `aws/workspace-postgres.tfvars` | Workspace, Unity Catalog, and PostgreSQL through classic VPC peering |
+| `aws/workspace-postgres-no-connectivity.tfvars` | Workspace and PostgreSQL in disconnected VPCs |
+| `aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
+| `aws/workspace-simulated-on-prem-disconnected.tfvars` | Workspace and simulated on-premises network without connectivity |
+| `aws/workspace-simulated-on-prem-transit-gateway.tfvars` | Classic compute connected to simulated on-premises through Transit Gateway |
+| `aws/workspace-simulated-on-prem-serverless-private-link.tfvars` | Serverless compute connected to simulated on-premises through an NCC private endpoint |
+| `azure/workspace-sql.tfvars` | VNet-injected Azure workspace and private Azure SQL Database |
 
-For example:
+## Deploy the scenario
 
-```bash
-mkdir -p environments/local
-cp environments/examples/aws/workspace-postgres.tfvars environments/local/my-aws.tfvars
-```
-
-## Deploy safely
-
-Terraform 1.11 or newer is required.
-
-Set local authentication profiles in the shell, validate, save a plan, review
-it, and then apply that exact plan:
+Terraform 1.11 or newer is required. Use `./infra` for validation, planning,
+deployment, endpoint operations, and destruction. It validates authentication
+and applies only the exact saved plan that was reviewed.
 
 ```bash
 export AWS_PROFILE=<aws-profile>
 export DATABRICKS_ACCOUNT_PROFILE=<databricks-account-profile>
-# Set DATABRICKS_WORKSPACE_PROFILE after the workspace exists, if needed.
 
-./infra list
 ./infra validate aws
-./infra plan aws environments/local/my-aws.tfvars
-./infra apply aws environments/local/my-aws.tfvars
+./infra plan aws environments/local/my-scenario.tfvars
+# Review the saved-plan summary before continuing.
+./infra apply aws environments/local/my-scenario.tfvars
 ```
 
-`plan` verifies authentication automatically. Use `./infra doctor aws <tfvars>`
-only when troubleshooting a session. `apply` accepts only the environment's
-saved plan and verifies its cloud account, configuration, tfvars, state, and
-provider lock before applying. Endpoint acceptance, deployment, and destruction
-are separate external changes.
+Set `DATABRICKS_WORKSPACE_PROFILE` after the workspace exists when a workflow
+needs workspace-level authentication. Use `./infra doctor <cloud> <tfvars>` to
+troubleshoot authentication.
 
-Destruction also requires a saved plan and typed confirmation:
-
-Before creating it, configure workspace-level authentication so `./infra
-destroy` can terminate active clusters automatically, reject active serverless
-PrivateLink endpoint connections with `./infra endpoints aws reject`, and set
-`allow_destructive_demo_cleanup = true` only for disposable environments so
-versioned buckets can be emptied. See the
-[deployment workflow](guides/operations/deployment.md#destroy) for the full
-checklist.
+AWS PrivateLink endpoint services require explicit endpoint acceptance:
 
 ```bash
-./infra destroy-plan aws environments/local/my-aws.tfvars
-./infra destroy aws environments/local/my-aws.tfvars --confirm destroy-aws
+./infra endpoints aws status environments/local/my-scenario.tfvars
+./infra endpoints aws accept environments/local/my-scenario.tfvars \
+  --service-id vpce-svc-... \
+  --endpoint-id vpce-...
 ```
 
-This repository uses isolated local state under
-`.state/<cloud>/<deployment-id>`. State, plans, local environment files,
-credentials, and generated secrets are ignored by Git and must never be
-committed. Set `INFRA_DEPLOYMENT_ID` when an application needs to provide a
-stable customer/deployment identifier.
+## Destroy the scenario
 
-## Documentation
+These labs create billable cloud resources. Destroy them when the exercise is
+finished:
 
-Start at the [guides index](guides/README.md). Tutorials are organized by cloud,
-compute type, and data source. Cross-cutting references cover
-[authentication](guides/operations/authentication.md), the
-[deployment workflow](guides/operations/deployment.md),
-[local Terraform state](guides/operations/state.md), and the future
-[application integration baseline](guides/operations/application-integration.md).
+```bash
+./infra destroy-plan aws environments/local/my-scenario.tfvars
+# Review the saved destroy-plan summary before continuing.
+./infra destroy aws environments/local/my-scenario.tfvars --confirm destroy-aws
+```
 
-`components.json` is the machine-readable feature catalog. `AGENTS.md` defines the repository guardrails for infrastructure agents.
+Before an AWS destroy, configure workspace authentication so `./infra` can
+terminate active clusters. Active serverless endpoint connections must be
+rejected explicitly. Disposable environments that need automatic cleanup of
+versioned buckets must set `allow_destructive_demo_cleanup = true`. See the
+[deployment workflow](guides/operations/deployment.md#destroy) for the complete
+checklist.
+
+## Safety and project structure
+
+- Never commit local environment files, credentials, secrets, Terraform state,
+  or saved plans.
+- Local deployments use isolated state under
+  `.state/<cloud>/<deployment-id>`.
+- `components.json` is the machine-readable catalog of components and supported
+  connectivity modes.
+- `AGENTS.md` defines the guardrails for infrastructure agents.
+- `modules/` contains the reusable cloud components.
+- `guides/` contains networking explanations, tutorials, authentication, state,
+  and deployment procedures.
+
+Start with the [guides index](guides/README.md), the
+[AWS connectivity guide](guides/aws/connectivity.md), or the
+[deployment workflow](guides/operations/deployment.md).
