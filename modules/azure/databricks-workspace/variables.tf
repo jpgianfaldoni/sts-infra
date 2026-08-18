@@ -1,26 +1,44 @@
 variable "location" {
   type = string
 }
+
 variable "workspace_name" {
   type = string
 }
+
 variable "resource_prefix" {
   type = string
 }
-variable "vnet_cidr" {
+
+variable "resource_group_name" {
   type = string
 }
-variable "host_subnet_cidr" {
+
+variable "vnet_id" {
   type = string
 }
-variable "container_subnet_cidr" {
+
+variable "host_subnet_name" {
   type = string
 }
-variable "private_endpoint_subnet_cidr" {
+
+variable "container_subnet_name" {
   type = string
 }
+
+variable "host_nsg_association_id" {
+  type = string
+}
+
+variable "container_nsg_association_id" {
+  type = string
+}
+
+variable "private_endpoint_subnet_id" {
+  type = string
+}
+
 variable "tags" {
-  type = map(string)
-  default = {
-  }
+  type    = map(string)
+  default = {}
 }

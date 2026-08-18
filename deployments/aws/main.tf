@@ -91,6 +91,21 @@ module "rabbitmq" {
   tags                           = var.tags
 }
 
+module "kafka" {
+  count                          = var.features.kafka ? 1 : 0
+  source                         = "../../modules/aws/kafka"
+  name_prefix                    = "${var.name_prefix}-kafka"
+  region                         = var.region
+  vpc_cidr                       = var.database_networks.kafka
+  instance_type                  = var.kafka.instance_type
+  kafka_image                    = var.kafka.image
+  topic_name                     = var.kafka.topic_name
+  producer_interval_seconds      = var.kafka.producer_interval_seconds
+  enable_classic_private_link    = var.connectivity.kafka.classic == "private_link"
+  enable_serverless_private_link = var.connectivity.kafka.serverless == "private_link"
+  tags                           = var.tags
+}
+
 module "simulated_on_prem" {
   count  = var.features.simulated_on_prem ? 1 : 0
   source = "../../modules/aws/simulated-on-prem"
@@ -214,6 +229,22 @@ module "rabbitmq_classic_private_link" {
   depends_on               = [module.rabbitmq]
 }
 
+module "kafka_classic_private_link" {
+  count  = var.features.kafka && var.connectivity.kafka.classic == "private_link" ? 1 : 0
+  source = "../../modules/aws/classic-private-link"
+
+  name                     = "${var.name_prefix}-kafka-classic"
+  vpc_id                   = module.workspace[0].vpc_id
+  subnet_ids               = module.workspace[0].private_subnet_ids
+  client_security_group_id = module.workspace[0].security_group_id
+  endpoint_service_name    = module.kafka[0].endpoint_service_name
+  service_port             = module.kafka[0].private_link_port
+  private_dns_name         = module.kafka[0].private_link_host
+  create_private_dns_alias = true
+  tags                     = var.tags
+  depends_on               = [module.kafka]
+}
+
 locals {
   ncc_rules = merge(
     var.features.rds_postgres && var.connectivity.rds_postgres.serverless == "private_link" ? { rds_postgres = { endpoint_service = module.rds_postgres[0].endpoint_service_name
@@ -236,6 +267,11 @@ locals {
       }
       } : {
     },
+    var.features.kafka && var.connectivity.kafka.serverless == "private_link" ? { kafka = { endpoint_service = module.kafka[0].endpoint_service_name
+      domain_names = [module.kafka[0].private_link_host]
+      }
+      } : {
+    },
     var.features.simulated_on_prem && var.connectivity.simulated_on_prem.serverless == "private_link" ? { simulated_on_prem = { endpoint_service = module.simulated_on_prem[0].endpoint_service_name
       domain_names = [module.simulated_on_prem[0].nlb_dns_name]
       }
@@ -253,7 +289,7 @@ module "ncc" {
   region                 = var.region
   workspace_id           = module.workspace[0].workspace_id
   private_endpoint_rules = local.ncc_rules
-  depends_on             = [module.rds_postgres, module.rds_sql_server, module.aurora_postgres, module.rabbitmq, module.simulated_on_prem]
+  depends_on             = [module.rds_postgres, module.rds_sql_server, module.aurora_postgres, module.rabbitmq, module.kafka, module.simulated_on_prem]
 }
 
 module "postgres_peering" {
@@ -317,5 +353,21 @@ module "rabbitmq_peering" {
   service_route_table_ids   = module.rabbitmq[0].route_table_ids
   service_security_group_id = module.rabbitmq[0].security_group_id
   service_port              = module.rabbitmq[0].port
+  tags                      = var.tags
+}
+
+module "kafka_peering" {
+  count                     = var.features.kafka && var.connectivity.kafka.classic == "peering" ? 1 : 0
+  source                    = "../../modules/aws/vpc-peering"
+  name                      = "${var.name_prefix}-kafka"
+  client_vpc_id             = module.workspace[0].vpc_id
+  client_vpc_cidr           = module.workspace[0].vpc_cidr
+  client_route_table_ids    = module.workspace[0].private_route_table_ids
+  client_security_group_id  = module.workspace[0].security_group_id
+  service_vpc_id            = module.kafka[0].vpc_id
+  service_vpc_cidr          = module.kafka[0].vpc_cidr
+  service_route_table_ids   = module.kafka[0].route_table_ids
+  service_security_group_id = module.kafka[0].security_group_id
+  service_port              = module.kafka[0].internal_port
   tags                      = var.tags
 }

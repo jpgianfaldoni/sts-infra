@@ -11,6 +11,7 @@
         "aurora_postgres": { "module": "aurora-postgres", "feature": "features.aurora_postgres", "connectivity": { "classic": { "path": "connectivity.aurora_postgres.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.aurora_postgres.serverless", "modes": ["none", "private_link"] } } },
         "aurora_proxy": { "module": "aurora-postgres", "feature": "features.aurora_proxy", "dependencies": ["aurora_postgres"] },
         "rabbitmq": { "module": "rabbitmq", "feature": "features.rabbitmq", "connectivity": { "classic": { "path": "connectivity.rabbitmq.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.rabbitmq.serverless", "modes": ["none", "private_link"] } } },
+        "kafka": { "module": "kafka", "feature": "features.kafka", "connectivity": { "classic": { "path": "connectivity.kafka.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.kafka.serverless", "modes": ["none", "private_link"] } } },
         "simulated_on_prem": { "module": "simulated-on-prem", "feature": "features.simulated_on_prem", "connectivity": { "classic": { "path": "connectivity.simulated_on_prem.classic", "modes": ["none", "transit_gateway"] }, "serverless": { "path": "connectivity.simulated_on_prem.serverless", "modes": ["none", "private_link"] } } },
         "classic_private_link": { "module": "classic-private-link", "feature": "derived.classic_private_link", "dependencies": ["workspace"] },
         "ncc": { "module": "ncc", "feature": "derived.serverless_private_link", "dependencies": ["workspace"] },
@@ -21,6 +22,7 @@
       "root": "deployments/azure",
       "components": {
         "workspace": { "module": "databricks-workspace", "feature": "features.workspace", "dependencies": [] },
+        "custom_dns": { "module": "custom-dns", "feature": "features.custom_dns", "dependencies": ["workspace"] },
         "sql_database": { "module": "sql-database", "feature": "features.sql_database", "dependencies": [] },
         "sql_server_vm": { "module": "sql-server-vm", "feature": "features.sql_server_vm", "dependencies": [] }
       }

@@ -28,6 +28,19 @@ variable "service_port" {
   type        = number
 }
 
+variable "private_dns_name" {
+  description = "Optional service hostname to resolve to this interface endpoint. Required when the application advertises its own hostname, as Kafka does."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
+variable "create_private_dns_alias" {
+  description = "Create a private hosted-zone alias from private_dns_name to the interface endpoint."
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   type = map(string)
   default = {

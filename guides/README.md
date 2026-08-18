@@ -5,6 +5,7 @@ Guides are organized by cloud, Databricks compute type, and data source.
 ## AWS
 
 - [Connectivity modes](aws/connectivity.md)
+- [Kafka streaming lab](aws/kafka/overview.md)
 - [Classic compute](aws/classic/README.md)
 - [Serverless compute](aws/serverless/README.md)
 - [Simulated on-premises network](aws/classic/simulated-on-prem/overview.md)

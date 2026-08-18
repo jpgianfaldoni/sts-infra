@@ -109,6 +109,7 @@ run "all_features_disabled" {
       aurora_postgres = false
       aurora_proxy    = false
       rabbitmq        = false
+      kafka           = false
     }
   }
   assert {
@@ -241,6 +242,7 @@ run "all_services_for_classic_and_serverless_private_link" {
       aurora_postgres = true
       aurora_proxy    = false
       rabbitmq        = true
+      kafka           = true
     }
     connectivity = {
       rds_postgres = {
@@ -259,6 +261,10 @@ run "all_services_for_classic_and_serverless_private_link" {
         classic    = "private_link"
         serverless = "private_link"
       }
+      kafka = {
+        classic    = "private_link"
+        serverless = "private_link"
+      }
     }
   }
   assert {
@@ -266,10 +272,61 @@ run "all_services_for_classic_and_serverless_private_link" {
       output.connectivity.rds_postgres.serverless.mode == "private_link",
       output.connectivity.rds_sql_server.serverless.mode == "private_link",
       output.connectivity.aurora_postgres.serverless.mode == "private_link",
-      output.connectivity.rabbitmq.serverless.mode == "private_link"
+      output.connectivity.rabbitmq.serverless.mode == "private_link",
+      output.connectivity.kafka.serverless.mode == "private_link"
     ])
-    error_message = "All four services must enable serverless PrivateLink."
+    error_message = "All five services must enable serverless PrivateLink."
   }
+}
+
+run "kafka_classic_peering_and_serverless_private_link" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = false
+      kafka         = true
+    }
+    connectivity = {
+      kafka = {
+        classic    = "peering"
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition     = output.connectivity.kafka.classic.mode == "peering" && output.connectivity.kafka.classic.port == 9092
+    error_message = "Classic Kafka must use its direct peering listener."
+  }
+
+  assert {
+    condition     = output.connectivity.kafka.serverless.mode == "private_link" && output.connectivity.kafka.serverless.port == 9094
+    error_message = "Serverless Kafka must use its PrivateLink listener."
+  }
+
+}
+
+run "reject_kafka_connectivity_when_disabled" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = false
+      kafka         = false
+    }
+    connectivity = {
+      kafka = {
+        classic = "peering"
+      }
+    }
+  }
+
+  expect_failures = [var.connectivity]
 }
 
 run "reject_serverless_peering" {

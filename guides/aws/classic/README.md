@@ -15,6 +15,10 @@
 
 - [Overview](rds-sql-server/overview.md)
 
+## Kafka
+
+- [Streaming lab](../kafka/overview.md)
+
 ## Simulated on-premises
 
 - [Private EC2 network with optional Transit Gateway connectivity](simulated-on-prem/overview.md)

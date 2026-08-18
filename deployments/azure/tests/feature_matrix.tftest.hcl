@@ -7,6 +7,7 @@ run "all_features_disabled" {
     subscription_id = "00000000-0000-0000-0000-000000000000"
     features = {
       workspace     = false
+      custom_dns    = false
       sql_database  = false
       sql_server_vm = false
     }

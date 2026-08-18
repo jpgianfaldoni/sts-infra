@@ -1,0 +1,125 @@
+#!/bin/bash
+set -euo pipefail
+
+dnf install -y docker jq
+systemctl enable --now docker
+
+secret_json=$(aws secretsmanager get-secret-value \
+  --region ${region} \
+  --secret-id ${secret_arn} \
+  --query SecretString \
+  --output text)
+username=$(printf '%s' "$secret_json" | jq -r .username)
+password=$(printf '%s' "$secret_json" | jq -r .password)
+
+install -d -o 1000 -g 1000 -m 0700 /etc/kafka
+cat > /etc/kafka/broker_jaas.conf <<EOF
+KafkaServer {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="$username"
+  password="$password"
+  user_$username="$password";
+};
+EOF
+
+cat > /etc/kafka/client.properties <<EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="$username" password="$password";
+EOF
+chown 1000:1000 /etc/kafka/broker_jaas.conf /etc/kafka/client.properties
+chmod 0400 /etc/kafka/broker_jaas.conf /etc/kafka/client.properties
+
+token=$(curl -fsS -X PUT \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' \
+  http://169.254.169.254/latest/api/token)
+private_ip=$(curl -fsS \
+  -H "X-aws-ec2-metadata-token: $token" \
+  http://169.254.169.254/latest/meta-data/local-ipv4)
+
+docker run -d \
+  --name kafka \
+  --restart unless-stopped \
+  -p ${internal_port}:${internal_port} \
+  -p ${private_link_port}:${private_link_port} \
+  -v /etc/kafka:/etc/kafka/secrets:ro,Z \
+  -e KAFKA_NODE_ID=1 \
+  -e 'KAFKA_PROCESS_ROLES=broker,controller' \
+  -e 'KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:29093' \
+  -e 'KAFKA_LISTENERS=CONTROLLER://:29093,LOCAL://:${local_port},INTERNAL://:${internal_port},PRIVATELINK://:${private_link_port}' \
+  -e "KAFKA_ADVERTISED_LISTENERS=LOCAL://localhost:${local_port},INTERNAL://$private_ip:${internal_port},PRIVATELINK://${private_link_host}:${private_link_port}" \
+  -e 'KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,LOCAL:SASL_PLAINTEXT,INTERNAL:SASL_PLAINTEXT,PRIVATELINK:SASL_PLAINTEXT' \
+  -e KAFKA_INTER_BROKER_LISTENER_NAME=LOCAL \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_SASL_ENABLED_MECHANISMS=PLAIN \
+  -e KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL=PLAIN \
+  -e 'KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/secrets/broker_jaas.conf' \
+  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+  -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+  -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
+  -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false \
+  -e KAFKA_LOG_RETENTION_HOURS=24 \
+  ${kafka_image}
+
+for attempt in $(seq 1 60); do
+  if docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+      --bootstrap-server "127.0.0.1:${local_port}" \
+      --command-config /etc/kafka/secrets/client.properties \
+      --list >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$attempt" -eq 60 ]; then
+    echo 'Kafka did not become ready within five minutes.' >&2
+    exit 1
+  fi
+  sleep 5
+done
+
+docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server "127.0.0.1:${local_port}" \
+  --command-config /etc/kafka/secrets/client.properties \
+  --create \
+  --if-not-exists \
+  --topic ${topic_name} \
+  --partitions 3 \
+  --replication-factor 1
+
+cat > /usr/local/bin/kafka-demo-producer <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+while true; do
+  event_id=$(cat /proc/sys/kernel/random/uuid)
+  event_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  customer_id=$((RANDOM % 1000 + 1))
+  amount_cents=$((RANDOM % 50000 + 100))
+  printf '{"event_id":"%s","event_time":"%s","customer_id":%d,"event_type":"purchase","amount":%d.%02d}\n' \
+    "$event_id" "$event_time" "$customer_id" "$((amount_cents / 100))" "$((amount_cents % 100))"
+  sleep ${producer_interval_seconds}
+done | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server 127.0.0.1:${local_port} \
+  --producer.config /etc/kafka/secrets/client.properties \
+  --topic ${topic_name}
+SCRIPT
+chmod 0755 /usr/local/bin/kafka-demo-producer
+
+cat > /etc/systemd/system/kafka-demo-producer.service <<'UNIT'
+[Unit]
+Description=Continuous synthetic Kafka event producer
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kafka-demo-producer
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now kafka-demo-producer.service
+unset secret_json username password token private_ip

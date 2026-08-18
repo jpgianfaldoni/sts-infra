@@ -7,6 +7,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ./infra list
+  ./infra setup <aws|azure> <environment.tfvars>
   ./infra doctor <aws|azure> <environment.tfvars>
   ./infra validate <aws|azure>
   ./infra plan <aws|azure> <environment.tfvars>
@@ -23,6 +24,7 @@ Authentication overrides for local operators:
   AWS_PROFILE
   DATABRICKS_ACCOUNT_PROFILE (DATABRICKS_CONFIG_PROFILE is also supported)
   DATABRICKS_WORKSPACE_PROFILE
+  STS_INFRA_AUTH_CONFIG (defaults to ~/.config/sts-infra/auth.json)
 
 Automation can omit profiles and use the standard AWS and Databricks provider
 environment variables. Set INFRA_DEPLOYMENT_ID to supply a stable application
@@ -85,6 +87,100 @@ deployment_id_for() {
   [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || die "deployment ID must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}"
   [[ "$id" != "default" ]] || die "deployment ID 'default' is reserved by Terraform"
   printf '%s' "$id"
+}
+
+auth_config_path() {
+  if [[ -n "${STS_INFRA_AUTH_CONFIG:-}" ]]; then
+    printf '%s' "$STS_INFRA_AUTH_CONFIG"
+  elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    printf '%s/sts-infra/auth.json' "$XDG_CONFIG_HOME"
+  else
+    printf '%s/.config/sts-infra/auth.json' "${HOME:?HOME is required to locate the local authentication config}"
+  fi
+}
+
+validate_auth_config() {
+  local config="$1"
+  [[ -f "$config" ]] || return 0
+  jq -e '
+    type == "object" and
+    .version == 1 and
+    (.deployments | type == "object") and
+    ((keys - ["deployments", "version"]) | length == 0) and
+    all(.deployments[];
+      type == "object" and
+      ((keys - ["aws_account_id", "aws_profile", "databricks_account_id", "databricks_account_profile"]) | length == 0) and
+      all(.[]; type == "string" and length > 0)
+    )
+  ' "$config" >/dev/null || die "invalid local authentication config: $config"
+}
+
+auth_config_value() {
+  local cloud="$1" vars="$2" field="$3" config key
+  config="$(auth_config_path)"
+  [[ -f "$config" ]] || return 0
+  validate_auth_config "$config"
+  key="$cloud/$(deployment_id_for "$vars")"
+  jq -r --arg key "$key" --arg field "$field" '.deployments[$key][$field] // empty' "$config"
+}
+
+save_aws_auth_config() {
+  local vars="$1" aws_profile="$2" aws_account_id="$3" db_account_id="$4" db_profile="$5"
+  local config config_dir key temp
+  config="$(auth_config_path)"
+  config_dir="$(dirname "$config")"
+  key="aws/$(deployment_id_for "$vars")"
+  validate_auth_config "$config"
+
+  (
+    umask 077
+    mkdir -p "$config_dir"
+    temp="$(mktemp "$config_dir/.auth.json.tmp.XXXXXX")"
+    trap 'rm -f "$temp"' EXIT
+    if [[ -f "$config" ]]; then
+      jq \
+        --arg key "$key" \
+        --arg aws_profile "$aws_profile" \
+        --arg aws_account_id "$aws_account_id" \
+        --arg db_account_id "$db_account_id" \
+        --arg db_profile "$db_profile" \
+        '.deployments[$key] = {
+          aws_profile: $aws_profile,
+          aws_account_id: $aws_account_id,
+          databricks_account_id: $db_account_id,
+          databricks_account_profile: $db_profile
+        }' "$config" > "$temp"
+    else
+      jq -n \
+        --arg key "$key" \
+        --arg aws_profile "$aws_profile" \
+        --arg aws_account_id "$aws_account_id" \
+        --arg db_account_id "$db_account_id" \
+        --arg db_profile "$db_profile" \
+        '{version: 1, deployments: {($key): {
+          aws_profile: $aws_profile,
+          aws_account_id: $aws_account_id,
+          databricks_account_id: $db_account_id,
+          databricks_account_profile: $db_profile
+        }}}' > "$temp"
+    fi
+    chmod 600 "$temp"
+    mv "$temp" "$config"
+    trap - EXIT
+  )
+}
+
+prompt_value() {
+  local label="$1" default_value="$2" value
+  if [[ -n "$default_value" ]]; then
+    printf '%s [%s]: ' "$label" "$default_value" >&2
+  else
+    printf '%s: ' "$label" >&2
+  fi
+  IFS= read -r value || die "setup input ended before $label was provided"
+  value="${value:-$default_value}"
+  [[ -n "$value" ]] || die "$label is required"
+  printf '%s' "$value"
 }
 
 prepare_environment() {
@@ -158,6 +254,51 @@ databricks_workspace_cli() {
   fi
 }
 
+databricks_account_workspaces_json() {
+  if [[ -n "${AUTH_DB_ACCOUNT_PROFILE:-}" ]]; then
+    databricks account workspaces list --profile "$AUTH_DB_ACCOUNT_PROFILE" --output json
+  else
+    DATABRICKS_HOST="https://accounts.cloud.databricks.com" DATABRICKS_ACCOUNT_ID="$AUTH_DB_ACCOUNT_ID" \
+      databricks account workspaces list --output json
+  fi
+}
+
+state_workspace_id() {
+  [[ -f "${ENV_STATE:-}" ]] || return 0
+  jq -r '
+    [.resources[]? |
+      select(.type == "databricks_mws_workspaces") |
+      .instances[]?.attributes.workspace_id] |
+    first // empty
+  ' "$ENV_STATE"
+}
+
+state_requires_workspace_auth() {
+  [[ -f "${ENV_STATE:-}" ]] || return 1
+  jq -e '
+    any(.resources[]?;
+      (.type == "databricks_catalog" or
+       .type == "databricks_external_location" or
+       .type == "databricks_storage_credential") and
+      any(.instances[]?; true)
+    )
+  ' "$ENV_STATE" >/dev/null
+}
+
+state_workspace_absent_from_account() {
+  local workspace_id workspaces
+  workspace_id="$(state_workspace_id)"
+  [[ -n "$workspace_id" ]] || return 1
+  workspaces="$(databricks_account_workspaces_json)" || return 1
+  if printf '%s' "$workspaces" | jq -e --arg workspace_id "$workspace_id" '
+    (if type == "array" then . else (.workspaces // []) end) |
+    any(.[]; (.workspace_id | tostring) == $workspace_id)
+  ' >/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
 terminate_workspace_clusters() {
   local workspace_output workspace_url clusters_json cluster_rows cluster_ids=""
   local cluster_id cluster_name remaining_rows deadline_at requested=0
@@ -167,6 +308,14 @@ terminate_workspace_clusters() {
     die "could not parse the workspace URL from Terraform state before destroy"
   if [[ -z "$workspace_url" ]]; then
     echo "No workspace in state; skipping cluster termination."
+    return 0
+  fi
+  if [[ -z "$(state_workspace_id)" ]]; then
+    echo "No managed Databricks workspace resource remains in state; skipping cluster termination."
+    return 0
+  fi
+  if state_workspace_absent_from_account; then
+    echo "Workspace $(state_workspace_id) is absent from the Databricks account; skipping cluster termination for the externally deleted workspace."
     return 0
   fi
 
@@ -238,28 +387,118 @@ aws_region_for() {
   printf '%s' "${region:-us-west-2}"
 }
 
+aws_profile_exists() {
+  local profile="$1"
+  aws configure list-profiles 2>/dev/null | awk -v profile="$profile" '$0 == profile { found=1 } END { exit !found }'
+}
+
+databricks_account_profile_valid() {
+  local profile="$1" expected_account_id="$2" description configured_account_id configured_host
+  description="$(databricks auth describe --profile "$profile" --output json 2>/dev/null)" || return 1
+  configured_account_id="$(printf '%s' "$description" | jq -r '.account_id // .details.configuration.account_id.value // empty')"
+  configured_host="$(printf '%s' "$description" | jq -r '.details.host // .details.configuration.host.value // empty')"
+  [[ "$configured_account_id" == "$expected_account_id" ]] || return 1
+  [[ "$configured_host" == "https://accounts.cloud.databricks.com" ]] || return 1
+  databricks account workspaces list --profile "$profile" --output json >/dev/null
+}
+
+setup_aws_authentication() {
+  local vars="$1" config aws_profile aws_profile_default aws_identity aws_account_id region
+  local expected_db_account_id entered_db_account_id db_profile db_profile_default
+  prepare_environment aws "$vars"
+  config="$(auth_config_path)"
+  validate_auth_config "$config"
+
+  aws_profile_default="${AWS_PROFILE:-$(auth_config_value aws "$ENV_VARS" aws_profile)}"
+  aws_profile_default="${aws_profile_default:-$(tfvar_string "$ENV_VARS" aws_profile)}"
+  db_profile_default="${DATABRICKS_ACCOUNT_PROFILE:-${DATABRICKS_CONFIG_PROFILE:-$(auth_config_value aws "$ENV_VARS" databricks_account_profile)}}"
+  db_profile_default="${db_profile_default:-$(tfvar_string "$ENV_VARS" databricks_profile)}"
+  db_profile_default="${db_profile_default:-sts-${ENV_ID}-databricks}"
+  expected_db_account_id="$(tfvar_string "$ENV_VARS" databricks_account_id)"
+  [[ -n "$expected_db_account_id" ]] || die "databricks_account_id is required in $ENV_VARS"
+
+  echo "Interactive authentication setup for deployment '$ENV_ID'."
+  echo "Only profile names and account identifiers are saved; credentials remain in the AWS and Databricks CLI caches."
+  aws_profile="$(prompt_value "AWS CLI profile" "$aws_profile_default")"
+  entered_db_account_id="$(prompt_value "Databricks account ID" "$expected_db_account_id")"
+  [[ "$entered_db_account_id" == "$expected_db_account_id" ]] || die "Databricks account ID does not match $ENV_VARS"
+  db_profile="$(prompt_value "Databricks account profile" "$db_profile_default")"
+  region="$(aws_region_for "$ENV_VARS")"
+
+  if ! aws_profile_exists "$aws_profile"; then
+    echo "AWS profile '$aws_profile' is not configured; starting AWS IAM Identity Center configuration."
+    aws configure sso --profile "$aws_profile" || die "AWS SSO profile configuration failed"
+  fi
+  if ! aws_identity="$(aws sts get-caller-identity --profile "$aws_profile" --region "$region" --output json 2>/dev/null)"; then
+    echo "Starting AWS browser login for profile '$aws_profile'."
+    aws sso login --profile "$aws_profile" || die "AWS SSO login failed"
+    aws_identity="$(aws sts get-caller-identity --profile "$aws_profile" --region "$region" --output json)" || die "AWS session verification failed"
+  fi
+  aws_account_id="$(printf '%s' "$aws_identity" | jq -r '.Account // empty')"
+  [[ -n "$aws_account_id" ]] || die "could not determine the authenticated AWS account"
+
+  if ! databricks_account_profile_valid "$db_profile" "$entered_db_account_id" >/dev/null 2>&1; then
+    echo "Starting Databricks browser login for account '$entered_db_account_id' and profile '$db_profile'."
+    databricks auth login \
+      --host https://accounts.cloud.databricks.com \
+      --account-id "$entered_db_account_id" \
+      --profile "$db_profile" || die "Databricks OAuth login failed"
+  fi
+  databricks_account_profile_valid "$db_profile" "$entered_db_account_id" || die "Databricks account session verification failed"
+
+  save_aws_auth_config "$ENV_VARS" "$aws_profile" "$aws_account_id" "$entered_db_account_id" "$db_profile"
+  echo "Authentication setup complete."
+  echo "AWS account: $aws_account_id (profile: $aws_profile)"
+  echo "Databricks account: $entered_db_account_id (profile: $db_profile)"
+  echo "Local configuration: $config"
+}
+
+setup_azure_authentication() {
+  local vars="$1" subscription
+  prepare_environment azure "$vars"
+  subscription="$(tfvar_string "$ENV_VARS" subscription_id)"
+  [[ -n "$subscription" ]] || die "subscription_id is required in $ENV_VARS"
+  if ! az account show --subscription "$subscription" --output json >/dev/null 2>&1; then
+    echo "Starting Azure browser login."
+    az login >/dev/null || die "Azure login failed"
+  fi
+  az account show --subscription "$subscription" --output json >/dev/null || die "Azure session verification failed for subscription $subscription"
+  echo "Authentication setup complete for Azure subscription $subscription."
+}
+
 preflight() {
-  local cloud="$1" vars="$2"
+  local cloud="$1" vars="$2" action="${3:-check}"
   local aws_identity aws_account_id db_account_id subscription azure_identity
+  local configured_aws_account_id configured_db_account_id configured_aws_profile configured_db_profile
   cloud_root "$cloud" >/dev/null
   AUTH_TF_ARGS=()
   AUTH_AWS_PROFILE=""
   AUTH_AWS_REGION=""
+  AUTH_DB_ACCOUNT_PROFILE=""
+  AUTH_DB_ACCOUNT_ID=""
+  AUTH_DB_WORKSPACE_PROFILE=""
 
   if [[ "$cloud" == "aws" ]]; then
     AUTH_AWS_REGION="$(aws_region_for "$vars")"
-    AUTH_AWS_PROFILE="${AWS_PROFILE:-$(tfvar_string "$vars" aws_profile)}"
-    AUTH_DB_ACCOUNT_PROFILE="${DATABRICKS_ACCOUNT_PROFILE:-${DATABRICKS_CONFIG_PROFILE:-$(tfvar_string "$vars" databricks_profile)}}"
+    configured_aws_profile="$(auth_config_value aws "$vars" aws_profile)"
+    configured_aws_account_id="$(auth_config_value aws "$vars" aws_account_id)"
+    configured_db_account_id="$(auth_config_value aws "$vars" databricks_account_id)"
+    configured_db_profile="$(auth_config_value aws "$vars" databricks_account_profile)"
+    AUTH_AWS_PROFILE="${AWS_PROFILE:-${configured_aws_profile:-$(tfvar_string "$vars" aws_profile)}}"
+    AUTH_DB_ACCOUNT_PROFILE="${DATABRICKS_ACCOUNT_PROFILE:-${DATABRICKS_CONFIG_PROFILE:-${configured_db_profile:-$(tfvar_string "$vars" databricks_profile)}}}"
     AUTH_DB_WORKSPACE_PROFILE="${DATABRICKS_WORKSPACE_PROFILE:-$(tfvar_string "$vars" databricks_workspace_profile)}"
     db_account_id="$(tfvar_string "$vars" databricks_account_id)"
     [[ -n "$db_account_id" ]] || die "databricks_account_id is required in $vars"
+    AUTH_DB_ACCOUNT_ID="$db_account_id"
+    [[ -z "$configured_db_account_id" || "$configured_db_account_id" == "$db_account_id" ]] || die "local authentication config targets Databricks account $configured_db_account_id, but $vars requires $db_account_id; rerun ./infra setup aws $vars"
 
     aws_identity="$(aws_cli sts get-caller-identity --output json)" || die "AWS session unavailable. For local use, run: aws sso login --profile <profile>"
     aws_account_id="$(printf '%s' "$aws_identity" | jq -r '.Account // empty')"
     [[ -n "$aws_account_id" ]] || die "could not determine the authenticated AWS account"
+    [[ -z "$configured_aws_account_id" || "$configured_aws_account_id" == "$aws_account_id" ]] || die "AWS profile '$AUTH_AWS_PROFILE' authenticated to account $aws_account_id, but the local authentication config expects $configured_aws_account_id; rerun ./infra setup aws $vars"
 
     if [[ -n "$AUTH_DB_ACCOUNT_PROFILE" ]]; then
-      databricks account workspaces list --profile "$AUTH_DB_ACCOUNT_PROFILE" --output json >/dev/null || die "Databricks account session unavailable. Run: databricks auth login https://accounts.cloud.databricks.com --account-id $db_account_id --profile $AUTH_DB_ACCOUNT_PROFILE"
+      databricks_account_profile_valid "$AUTH_DB_ACCOUNT_PROFILE" "$db_account_id" || die "Databricks account session unavailable or profile targets another account. Run: databricks auth login --host https://accounts.cloud.databricks.com --account-id $db_account_id --profile $AUTH_DB_ACCOUNT_PROFILE"
       AUTH_TF_ARGS+=("-var=databricks_profile=$AUTH_DB_ACCOUNT_PROFILE")
     else
       DATABRICKS_HOST="https://accounts.cloud.databricks.com" DATABRICKS_ACCOUNT_ID="$db_account_id" \
@@ -267,8 +506,14 @@ preflight() {
     fi
 
     if [[ -n "$AUTH_DB_WORKSPACE_PROFILE" ]]; then
-      databricks current-user me --profile "$AUTH_DB_WORKSPACE_PROFILE" --output json >/dev/null || die "Databricks workspace session unavailable. Run: databricks auth login <workspace-url> --profile $AUTH_DB_WORKSPACE_PROFILE"
-      AUTH_TF_ARGS+=("-var=databricks_workspace_profile=$AUTH_DB_WORKSPACE_PROFILE")
+      if [[ "$action" == "destroy" ]] && ! state_requires_workspace_auth; then
+        echo "No workspace-scoped Databricks resources remain in state; workspace authentication is not required for destroy reconciliation."
+      elif [[ "$action" == "destroy" ]] && state_workspace_absent_from_account; then
+        echo "Databricks workspace $(state_workspace_id) was deleted externally; workspace authentication is not required for destroy reconciliation."
+      else
+        databricks current-user me --profile "$AUTH_DB_WORKSPACE_PROFILE" --output json >/dev/null || die "Databricks workspace session unavailable. Run: databricks auth login --host <workspace-url> --profile $AUTH_DB_WORKSPACE_PROFILE"
+        AUTH_TF_ARGS+=("-var=databricks_workspace_profile=$AUTH_DB_WORKSPACE_PROFILE")
+      fi
     fi
     if [[ -n "$AUTH_AWS_PROFILE" ]]; then
       AUTH_TF_ARGS+=("-var=aws_profile=$AUTH_AWS_PROFILE")
@@ -281,6 +526,7 @@ preflight() {
     subscription="$(tfvar_string "$vars" subscription_id)"
     [[ -n "$subscription" ]] || die "subscription_id is required in $vars"
     azure_identity="$(az account show --subscription "$subscription" --output json)" || die "Azure session unavailable. Run: az login"
+    AUTH_TF_ARGS+=("-var=subscription_id=$subscription")
     AUTH_CONTEXT_SHA="$(printf '%s' "$azure_identity" | jq -r '[.id, .tenantId, .user.type] | @tsv' | stdin_sha256)"
     echo "Azure authentication preflight passed."
   fi
@@ -340,7 +586,7 @@ create_plan() {
   check_legacy_state
   bind_environment
   acquire_operation_lock
-  preflight "$cloud" "$ENV_VARS"
+  preflight "$cloud" "$ENV_VARS" "$action"
 
   if [[ "$action" == "apply" ]]; then
     plan="$ENV_ARTIFACTS/apply.tfplan"
@@ -367,7 +613,7 @@ apply_plan() {
   check_legacy_state
   bind_environment
   acquire_operation_lock
-  preflight "$cloud" "$ENV_VARS"
+  preflight "$cloud" "$ENV_VARS" "$action"
 
   if [[ "$action" == "apply" ]]; then
     plan="$ENV_ARTIFACTS/apply.tfplan"
@@ -420,6 +666,14 @@ case "$command" in
   list)
     [[ $# -eq 1 ]] || { usage; exit 2; }
     jq . "$ROOT/components.json"
+    ;;
+  setup)
+    [[ $# -eq 3 ]] || { usage; exit 2; }
+    case "$2" in
+      aws) setup_aws_authentication "$3" ;;
+      azure) setup_azure_authentication "$3" ;;
+      *) die "cloud must be aws or azure" ;;
+    esac
     ;;
   doctor|auth)
     [[ $# -eq 3 ]] || { usage; exit 2; }

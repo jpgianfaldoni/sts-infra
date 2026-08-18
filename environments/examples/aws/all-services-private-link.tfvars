@@ -1,6 +1,6 @@
-databricks_account_id        = "00000000-0000-0000-0000-000000000000"
-name_prefix                  = "acme-lab"
-workspace_name               = "acme-lab-classic"
+databricks_account_id = "00000000-0000-0000-0000-000000000000"
+name_prefix           = "acme-lab"
+workspace_name        = "acme-lab-classic"
 
 features = {
   workspace       = true
@@ -10,6 +10,7 @@ features = {
   aurora_postgres = true
   aurora_proxy    = true
   rabbitmq        = true
+  kafka           = true
 }
 
 connectivity = {
@@ -26,6 +27,10 @@ connectivity = {
     serverless = "private_link"
   }
   rabbitmq = {
+    classic    = "private_link"
+    serverless = "private_link"
+  }
+  kafka = {
     classic    = "private_link"
     serverless = "private_link"
   }

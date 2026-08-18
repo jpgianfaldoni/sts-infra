@@ -75,6 +75,7 @@ variable "features" {
     aurora_postgres   = optional(bool, false)
     aurora_proxy      = optional(bool, false)
     rabbitmq          = optional(bool, false)
+    kafka             = optional(bool, false)
     simulated_on_prem = optional(bool, false)
   })
   default = {
@@ -103,6 +104,10 @@ variable "connectivity" {
       classic    = optional(string, "none")
       serverless = optional(string, "none")
     }), {})
+    kafka = optional(object({
+      classic    = optional(string, "none")
+      serverless = optional(string, "none")
+    }), {})
     simulated_on_prem = optional(object({
       classic    = optional(string, "none")
       serverless = optional(string, "none")
@@ -115,7 +120,8 @@ variable "connectivity" {
       var.connectivity.rds_postgres.classic,
       var.connectivity.rds_sql_server.classic,
       var.connectivity.aurora_postgres.classic,
-      var.connectivity.rabbitmq.classic
+      var.connectivity.rabbitmq.classic,
+      var.connectivity.kafka.classic
     ] : contains(["none", "peering", "private_link"], value)])
     error_message = "Classic connectivity modes must be none, peering, or private_link."
   }
@@ -124,7 +130,8 @@ variable "connectivity" {
       var.connectivity.rds_postgres.serverless,
       var.connectivity.rds_sql_server.serverless,
       var.connectivity.aurora_postgres.serverless,
-      var.connectivity.rabbitmq.serverless
+      var.connectivity.rabbitmq.serverless,
+      var.connectivity.kafka.serverless
     ] : contains(["none", "private_link"], value)])
     error_message = "Serverless connectivity modes must be none or private_link."
   }
@@ -146,6 +153,8 @@ variable "connectivity" {
       var.connectivity.aurora_postgres.serverless,
       var.connectivity.rabbitmq.classic,
       var.connectivity.rabbitmq.serverless,
+      var.connectivity.kafka.classic,
+      var.connectivity.kafka.serverless,
       var.connectivity.simulated_on_prem.classic,
       var.connectivity.simulated_on_prem.serverless
     ] : value == "none"])
@@ -157,6 +166,7 @@ variable "connectivity" {
       var.features.rds_sql_server || (var.connectivity.rds_sql_server.classic == "none" && var.connectivity.rds_sql_server.serverless == "none"),
       var.features.aurora_postgres || (var.connectivity.aurora_postgres.classic == "none" && var.connectivity.aurora_postgres.serverless == "none"),
       var.features.rabbitmq || (var.connectivity.rabbitmq.classic == "none" && var.connectivity.rabbitmq.serverless == "none"),
+      var.features.kafka || (var.connectivity.kafka.classic == "none" && var.connectivity.kafka.serverless == "none"),
       var.features.simulated_on_prem || (var.connectivity.simulated_on_prem.classic == "none" && var.connectivity.simulated_on_prem.serverless == "none")
     ])
     error_message = "Connectivity can only be enabled for a service whose feature is enabled."
@@ -198,11 +208,29 @@ variable "database_networks" {
     rds_sql_server  = string
     aurora_postgres = string
     rabbitmq        = string
+    kafka           = optional(string, "10.48.0.0/16")
   })
   default = { rds_postgres = "10.45.0.0/16"
     rds_sql_server  = "10.43.0.0/16"
     aurora_postgres = "10.46.0.0/16"
     rabbitmq        = "10.47.0.0/16"
+    kafka           = "10.48.0.0/16"
+  }
+}
+
+variable "kafka" {
+  description = "Configuration for the disposable single-broker Kafka lab."
+  type = object({
+    instance_type             = optional(string, "t3.small")
+    image                     = optional(string, "apache/kafka:3.9.1")
+    topic_name                = optional(string, "demo-events")
+    producer_interval_seconds = optional(number, 1)
+  })
+  default = {}
+
+  validation {
+    condition     = var.kafka.producer_interval_seconds >= 1 && var.kafka.producer_interval_seconds <= 3600
+    error_message = "kafka.producer_interval_seconds must be between 1 and 3600."
   }
 }
 variable "initial_catalog_name" {

@@ -1,6 +1,12 @@
 output "workspace_url" {
   value = try(module.workspace[0].workspace_url, null)
 }
+output "custom_dns" {
+  value = try({
+    private_ip = module.custom_dns[0].private_ip
+    vm_id      = module.custom_dns[0].vm_id
+  }, null)
+}
 output "sql_database" {
   value = try({ host = module.sql_database[0].host
     port     = module.sql_database[0].port

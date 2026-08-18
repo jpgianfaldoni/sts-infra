@@ -5,6 +5,10 @@
 - [Overview](rabbitmq/overview.md)
 - [NCC and PrivateLink tutorial](rabbitmq/private-link.md)
 
+## Kafka
+
+- [Streaming lab with NCC PrivateLink](../kafka/overview.md)
+
 ## RDS SQL Server
 
 - [NCC and PrivateLink tutorial](rds-sql-server/private-link.md)

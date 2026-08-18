@@ -33,8 +33,8 @@ An environment file answers three questions:
 2. Which resources should be created?
 3. How should Databricks compute reach each resource?
 
-Feature flags enable resources such as PostgreSQL, SQL Server, RabbitMQ, and a
-simulated on-premises network. Connectivity settings independently select the
+Feature flags enable resources such as PostgreSQL, SQL Server, RabbitMQ, Kafka,
+and a simulated on-premises network. Connectivity settings independently select the
 path for classic and serverless compute. Supporting resources such as VPC
 peering, load balancers, endpoint services, Network Connectivity
 Configurations (NCCs), private endpoints, or Transit Gateway are derived from
@@ -51,6 +51,7 @@ the supplied assets and guides.
 | --- | --- |
 | Demonstrate Lakeflow Connect SQL Server CDC on AWS | Databricks workspace + private RDS SQL Server + classic VPC peering; use the supplied SQL seed asset to finish the CDC setup |
 | Train on serverless connectivity to PostgreSQL on AWS | Databricks workspace + private RDS PostgreSQL + internal NLB + endpoint service + NCC private endpoint |
+| Stream synthetic Kafka events from classic and serverless compute | Databricks workspace + single private Kafka broker + continuous producer + classic peering or PrivateLink + serverless NCC private endpoint |
 | Demonstrate Lakeflow Connect PostgreSQL query-based ingestion on AWS | Databricks workspace + private PostgreSQL + selected classic or serverless network path; create the connection and pipeline after deployment |
 | Reproduce classic access to an on-premises service | Databricks workspace + isolated test-host VPC + Transit Gateway, attachments, routes, and security rules |
 | Compare classic and serverless access to the same private service | Classic path through peering or Transit Gateway plus a separate serverless path through PrivateLink and an NCC |
@@ -69,6 +70,7 @@ the supplied assets and guides.
 | `aurora_postgres` | Private Aurora PostgreSQL cluster with writer and reader endpoints |
 | `aurora_proxy` | RDS Proxy for Aurora PostgreSQL |
 | `rabbitmq` | Private self-managed RabbitMQ on EC2 |
+| `kafka` | Private single-broker Kafka lab on EC2 with SASL credentials and a continuous synthetic event producer |
 | `simulated_on_prem` | Isolated private network and HTTP test host representing an on-premises environment |
 
 AWS data sources are created in dedicated VPCs. Enabling a source does not
@@ -135,6 +137,7 @@ Available templates include:
 | `aws/workspace-postgres.tfvars` | Workspace, Unity Catalog, and PostgreSQL through classic VPC peering |
 | `aws/workspace-postgres-no-connectivity.tfvars` | Workspace and PostgreSQL in disconnected VPCs |
 | `aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
+| `aws/workspace-kafka-streaming.tfvars` | Kafka streaming from classic compute through peering and serverless compute through NCC PrivateLink |
 | `aws/workspace-simulated-on-prem-disconnected.tfvars` | Workspace and simulated on-premises network without connectivity |
 | `aws/workspace-simulated-on-prem-transit-gateway.tfvars` | Classic compute connected to simulated on-premises through Transit Gateway |
 | `aws/workspace-simulated-on-prem-serverless-private-link.tfvars` | Serverless compute connected to simulated on-premises through an NCC private endpoint |
@@ -147,14 +150,19 @@ deployment, endpoint operations, and destruction. It validates authentication
 and applies only the exact saved plan that was reviewed.
 
 ```bash
-export AWS_PROFILE=<aws-profile>
-export DATABRICKS_ACCOUNT_PROFILE=<databricks-account-profile>
+# First use on this machine: choose the local profiles and complete browser SSO.
+./infra setup aws environments/local/my-scenario.tfvars
 
 ./infra validate aws
 ./infra plan aws environments/local/my-scenario.tfvars
 # Review the saved-plan summary before continuing.
 ./infra apply aws environments/local/my-scenario.tfvars
 ```
+
+Setup writes only account identifiers and profile names to the per-user
+`~/.config/sts-infra/auth.json` file. AWS and Databricks credentials remain in
+their respective CLI caches. `AWS_PROFILE`, `DATABRICKS_ACCOUNT_PROFILE`, and
+`DATABRICKS_WORKSPACE_PROFILE` can still override the saved profile selection.
 
 Set `DATABRICKS_WORKSPACE_PROFILE` after the workspace exists when a workflow
 needs workspace-level authentication. Use `./infra doctor <cloud> <tfvars>` to

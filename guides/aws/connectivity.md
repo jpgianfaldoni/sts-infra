@@ -61,7 +61,12 @@ rds_postgres = {
 }
 ```
 
-The same shape applies to `rds_sql_server`, `aurora_postgres`, and `rabbitmq`. Classic supports `none`, `peering`, and `private_link`; serverless supports `none` and `private_link`.
+The same shape applies to `rds_sql_server`, `aurora_postgres`, `rabbitmq`, and
+`kafka`. Classic supports `none`, `peering`, and `private_link`; serverless
+supports `none` and `private_link`. Kafka uses separate advertised listener
+ports for direct peering (`9092`) and PrivateLink (`9094`) so broker metadata
+always returns an address reachable through the selected path. See the
+[Kafka streaming guide](kafka/overview.md).
 
 The simulated on-premises feature has a classic-only setting:
 

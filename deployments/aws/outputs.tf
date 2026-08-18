@@ -39,6 +39,14 @@ output "rabbitmq" {
     secret_arn = module.rabbitmq[0].secret_arn
   }, null)
 }
+output "kafka" {
+  value = try({
+    topic_name  = module.kafka[0].topic_name
+    secret_arn  = module.kafka[0].secret_arn
+    instance_id = module.kafka[0].instance_id
+    ssm_command = "aws ssm start-session --target ${module.kafka[0].instance_id} --region ${var.region}"
+  }, null)
+}
 output "simulated_on_prem" {
   value = try({
     vpc_id       = module.simulated_on_prem[0].vpc_id
@@ -99,6 +107,19 @@ output "connectivity" {
       serverless = {
         mode = var.connectivity.rabbitmq.serverless
         host = var.connectivity.rabbitmq.serverless == "private_link" ? try(module.rabbitmq[0].host, null) : null
+      }
+    }
+    kafka = {
+      classic = {
+        mode        = var.connectivity.kafka.classic
+        host        = var.connectivity.kafka.classic == "private_link" ? try(module.kafka_classic_private_link[0].host, null) : var.connectivity.kafka.classic == "peering" ? try(module.kafka[0].internal_host, null) : null
+        port        = var.connectivity.kafka.classic == "private_link" ? try(module.kafka[0].private_link_port, null) : var.connectivity.kafka.classic == "peering" ? try(module.kafka[0].internal_port, null) : null
+        endpoint_id = try(module.kafka_classic_private_link[0].endpoint_id, null)
+      }
+      serverless = {
+        mode = var.connectivity.kafka.serverless
+        host = var.connectivity.kafka.serverless == "private_link" ? try(module.kafka[0].private_link_host, null) : null
+        port = var.connectivity.kafka.serverless == "private_link" ? try(module.kafka[0].private_link_port, null) : null
       }
     }
     simulated_on_prem = {
