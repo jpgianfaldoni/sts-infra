@@ -66,10 +66,39 @@ variable "workspace_network" {
     error_message = "workspace_network must provide exactly two valid IPv4 Transit Gateway attachment subnet CIDRs."
   }
 }
+variable "glue_federation" {
+  description = "AWS Glue federation configuration, with optional Databricks Unity Catalog resources."
+  type = object({
+    databricks_connectivity_enabled  = optional(bool, false)
+    databricks_unity_catalog_iam_arn = optional(string, "arn:aws:iam::414351767826:role/unity-catalog-prod-UCMasterRole-14S5ZJVKOTYTL")
+    service_credential_external_id   = optional(string, "0000")
+    storage_credential_external_id   = optional(string, "0000")
+  })
+  default = {}
+
+  validation {
+    condition = (
+      trimspace(var.glue_federation.service_credential_external_id) != "" &&
+      trimspace(var.glue_federation.storage_credential_external_id) != "" &&
+      can(regex("^arn:[^:]+:iam::[0-9]{12}:role/.+$", var.glue_federation.databricks_unity_catalog_iam_arn))
+    )
+    error_message = "Glue federation credential external IDs must not be empty, and the Unity Catalog principal must be a valid IAM role ARN."
+  }
+
+  validation {
+    condition = !var.glue_federation.databricks_connectivity_enabled || (
+      var.features.glue_federation &&
+      var.features.workspace &&
+      var.features.unity_catalog
+    )
+    error_message = "Glue federation Databricks connectivity requires the glue_federation, workspace, and unity_catalog features."
+  }
+}
 variable "features" {
   type = object({
     workspace         = optional(bool, true)
     unity_catalog     = optional(bool, true)
+    glue_federation   = optional(bool, false)
     rds_postgres      = optional(bool, false)
     rds_sql_server    = optional(bool, false)
     aurora_postgres   = optional(bool, false)

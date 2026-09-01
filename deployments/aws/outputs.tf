@@ -9,6 +9,27 @@ output "workspace_url" {
 output "catalog_name" {
   value = try(module.unity_catalog[0].catalog_name, null)
 }
+output "glue_federation" {
+  description = "AWS Glue federation resources and optional Databricks Unity Catalog objects."
+  value = try({
+    bucket_name                     = module.glue_federation[0].bucket_name
+    sample_data_uri                 = module.glue_federation[0].sample_data_uri
+    catalog_storage_uri             = module.glue_federation[0].catalog_storage_uri
+    glue_catalog_id                 = module.glue_federation[0].glue_catalog_id
+    glue_database_name              = module.glue_federation[0].glue_database_name
+    glue_table_name                 = module.glue_federation[0].glue_table_name
+    service_credential_role_arn     = module.glue_federation[0].service_credential_role_arn
+    storage_credential_role_arn     = module.glue_federation[0].storage_credential_role_arn
+    databricks_connectivity_enabled = module.glue_federation[0].databricks_connectivity_enabled
+    service_credential_name         = module.glue_federation[0].service_credential_name
+    storage_credential_name         = module.glue_federation[0].storage_credential_name
+    external_location_name          = module.glue_federation[0].external_location_name
+    connection_name                 = module.glue_federation[0].connection_name
+    foreign_catalog_name            = module.glue_federation[0].foreign_catalog_name
+    service_trust_finalized         = module.glue_federation[0].service_trust_finalized
+    storage_trust_finalized         = module.glue_federation[0].storage_trust_finalized
+  }, null)
+}
 output "rds_postgres" {
   value = try({ host = module.rds_postgres[0].host
     port       = module.rds_postgres[0].port

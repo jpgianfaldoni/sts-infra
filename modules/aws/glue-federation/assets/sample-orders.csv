@@ -1,0 +1,6 @@
+order_id,customer,region,order_date,amount
+1001,Acme Retail,us-west,2026-08-01,1250.50
+1002,Northwind Labs,us-east,2026-08-02,845.25
+1003,Contoso Foods,eu-west,2026-08-03,2199.99
+1004,Adventure Works,apac,2026-08-04,410.00
+1005,Fabrikam Health,us-west,2026-08-05,1765.80

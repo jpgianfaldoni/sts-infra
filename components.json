@@ -6,6 +6,7 @@
       "components": {
         "workspace": { "module": "databricks-workspace", "feature": "features.workspace", "dependencies": [] },
         "unity_catalog": { "module": "unity-catalog", "feature": "features.unity_catalog", "dependencies": ["workspace"] },
+        "glue_federation": { "module": "glue-federation", "feature": "features.glue_federation", "dependencies": [] },
         "rds_postgres": { "module": "rds-postgres", "feature": "features.rds_postgres", "connectivity": { "classic": { "path": "connectivity.rds_postgres.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.rds_postgres.serverless", "modes": ["none", "private_link"] } } },
         "rds_sql_server": { "module": "rds-sql-server", "feature": "features.rds_sql_server", "connectivity": { "classic": { "path": "connectivity.rds_sql_server.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.rds_sql_server.serverless", "modes": ["none", "private_link"] } } },
         "aurora_postgres": { "module": "aurora-postgres", "feature": "features.aurora_postgres", "connectivity": { "classic": { "path": "connectivity.aurora_postgres.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.aurora_postgres.serverless", "modes": ["none", "private_link"] } } },

@@ -65,6 +65,7 @@ the supplied assets and guides.
 | --- | --- |
 | `workspace` | Databricks workspace in a dedicated VPC, private classic-compute subnets, NAT, root S3 storage, and cross-account IAM |
 | `unity_catalog` | Unity Catalog metastore, storage root, storage credential, external location, and initial catalog |
+| `glue_federation` | Private S3 sample data, Glue database and table, IAM roles, and optional Unity Catalog credentials, external location, connection, and foreign catalog |
 | `rds_postgres` | Private Amazon RDS for PostgreSQL |
 | `rds_sql_server` | Private Amazon RDS for SQL Server, suitable for Lakeflow Connect CDC labs |
 | `aurora_postgres` | Private Aurora PostgreSQL cluster with writer and reader endpoints |
@@ -135,6 +136,8 @@ Available templates include:
 | Template | Scenario |
 | --- | --- |
 | `aws/workspace-postgres.tfvars` | Workspace, Unity Catalog, and PostgreSQL through classic VPC peering |
+| `aws/glue-federation.tfvars` | AWS-only S3, Glue catalog, sample table, and credential roles for a manual federation setup |
+| `aws/glue-federation-with-databricks.tfvars` | End-to-end Glue federation including the workspace and Unity Catalog connectivity resources |
 | `aws/workspace-postgres-no-connectivity.tfvars` | Workspace and PostgreSQL in disconnected VPCs |
 | `aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
 | `aws/workspace-kafka-streaming.tfvars` | Kafka streaming from classic compute through peering and serverless compute through NCC PrivateLink |

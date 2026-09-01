@@ -40,6 +40,24 @@ module "unity_catalog" {
   tags                  = var.tags
 }
 
+module "glue_federation" {
+  count  = var.features.glue_federation ? 1 : 0
+  source = "../../modules/aws/glue-federation"
+  providers = {
+    databricks.workspace = databricks.workspace
+  }
+
+  name_prefix                        = var.name_prefix
+  region                             = var.region
+  databricks_connectivity_enabled    = var.glue_federation.databricks_connectivity_enabled
+  databricks_metastore_assignment_id = try(module.unity_catalog[0].metastore_assignment_id, null)
+  databricks_unity_catalog_iam_arn   = var.glue_federation.databricks_unity_catalog_iam_arn
+  service_credential_external_id     = var.glue_federation.service_credential_external_id
+  storage_credential_external_id     = var.glue_federation.storage_credential_external_id
+  force_destroy                      = var.allow_destructive_demo_cleanup
+  tags                               = var.tags
+}
+
 module "rds_postgres" {
   count                          = var.features.rds_postgres ? 1 : 0
   source                         = "../../modules/aws/rds-postgres"

@@ -14,6 +14,16 @@ mock_provider "aws" {
       partition = "aws"
     }
   }
+  mock_data "aws_iam_policy_document" {
+    defaults = {
+      json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
+    }
+  }
+  mock_resource "aws_iam_policy" {
+    defaults = {
+      arn = "arn:aws:iam::123456789012:policy/mock-policy"
+    }
+  }
   mock_data "aws_ami" {
     defaults = {
       id = "ami-0123456789abcdef0"
@@ -44,6 +54,16 @@ mock_provider "databricks" {
     }
   }
   mock_data "databricks_aws_bucket_policy" {
+    defaults = {
+      json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
+    }
+  }
+  mock_data "databricks_aws_unity_catalog_assume_role_policy" {
+    defaults = {
+      json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
+    }
+  }
+  mock_data "databricks_aws_unity_catalog_policy" {
     defaults = {
       json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
     }
@@ -116,6 +136,91 @@ run "all_features_disabled" {
     condition     = output.workspace_url == null
     error_message = "The workspace must not be composed when its feature is disabled."
   }
+}
+
+run "glue_federation_aws_resources_only" {
+  command = apply
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace       = false
+      unity_catalog   = false
+      glue_federation = true
+    }
+  }
+
+  assert {
+    condition     = output.workspace_url == null
+    error_message = "The AWS-only Glue federation component must not create a Databricks workspace."
+  }
+
+  assert {
+    condition     = output.glue_federation.glue_database_name == "demo_glue_federation"
+    error_message = "The Glue database name must be derived from the deployment prefix."
+  }
+
+  assert {
+    condition = (
+      !output.glue_federation.service_trust_finalized &&
+      !output.glue_federation.storage_trust_finalized &&
+      !output.glue_federation.databricks_connectivity_enabled &&
+      output.glue_federation.service_credential_name == null &&
+      output.glue_federation.storage_credential_name == null &&
+      output.glue_federation.external_location_name == null &&
+      output.glue_federation.connection_name == null &&
+      output.glue_federation.foreign_catalog_name == null
+    )
+    error_message = "AWS-only Glue federation must use placeholder trust and omit all Databricks resources."
+  }
+}
+
+run "glue_federation_with_databricks_connectivity" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace       = true
+      unity_catalog   = true
+      glue_federation = true
+    }
+    glue_federation = {
+      databricks_connectivity_enabled = true
+    }
+  }
+
+  assert {
+    condition = (
+      output.glue_federation.databricks_connectivity_enabled &&
+      output.glue_federation.service_credential_name == "demo_glue_service_credential" &&
+      output.glue_federation.storage_credential_name == "demo_glue_storage_credential" &&
+      output.glue_federation.external_location_name == "demo_glue_external_location" &&
+      output.glue_federation.connection_name == "demo_glue_connection" &&
+      output.glue_federation.foreign_catalog_name == "demo_glue_catalog" &&
+      output.glue_federation.service_trust_finalized &&
+      output.glue_federation.storage_trust_finalized
+    )
+    error_message = "Databricks-enabled Glue federation must compose every Unity Catalog resource with neutral prefix-derived names."
+  }
+}
+
+run "reject_glue_databricks_connectivity_without_workspace_and_unity_catalog" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace       = false
+      unity_catalog   = false
+      glue_federation = true
+    }
+    glue_federation = {
+      databricks_connectivity_enabled = true
+    }
+  }
+
+  expect_failures = [var.glue_federation]
 }
 
 run "reject_orphan_unity_catalog" {

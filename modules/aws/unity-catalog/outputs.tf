@@ -1,6 +1,9 @@
 output "metastore_id" {
   value = databricks_metastore.this.id
 }
+output "metastore_assignment_id" {
+  value = databricks_metastore_assignment.this.id
+}
 output "catalog_name" {
   value = databricks_catalog.initial.name
 }
