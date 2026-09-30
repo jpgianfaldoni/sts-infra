@@ -22,6 +22,12 @@ variable "private_endpoint_subnet_cidr" {
   type = string
 }
 
+variable "test_vm_subnet_cidr" {
+  type     = string
+  nullable = true
+  default  = null
+}
+
 variable "dns_subnet_cidr" {
   type = string
 }

@@ -299,7 +299,7 @@ resource "aws_vpc_security_group_ingress_rule" "host_from_nlb" {
 
 resource "aws_lb" "this" {
   count                                                        = local.enable_serverless_private_link ? 1 : 0
-  name                                                         = substr("${local.name}-pl", 0, 32)
+  name                                                         = trimsuffix(substr("${local.name}-pl", 0, 32), "-")
   internal                                                     = true
   load_balancer_type                                           = "network"
   subnets                                                      = [aws_subnet.workload.id]
@@ -311,7 +311,7 @@ resource "aws_lb" "this" {
 
 resource "aws_lb_target_group" "this" {
   count              = local.enable_serverless_private_link ? 1 : 0
-  name               = substr("${local.name}-svc", 0, 32)
+  name               = trimsuffix(substr("${local.name}-svc", 0, 32), "-")
   port               = var.service_port
   protocol           = "TCP"
   target_type        = "instance"

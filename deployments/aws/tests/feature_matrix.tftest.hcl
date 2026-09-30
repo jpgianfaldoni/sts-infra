@@ -68,11 +68,26 @@ mock_provider "databricks" {
       json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
     }
   }
+  mock_data "databricks_metastore" {
+    defaults = {
+      id           = "11111111-2222-3333-4444-555555555555"
+      metastore_id = "11111111-2222-3333-4444-555555555555"
+      region       = "us-west-2"
+    }
+  }
+  mock_data "databricks_metastores" {
+    defaults = {
+      ids = {}
+    }
+  }
 }
 mock_provider "databricks" {
   alias = "workspace"
 }
-mock_provider "random" {}
+# The real random provider runs locally without cloud access. It is used instead
+# of a mock because mock providers do not support ephemeral resources, which the
+# brokers use for credentials that must never enter state.
+provider "random" {}
 mock_provider "time" {}
 mock_provider "archive" {}
 
@@ -135,6 +150,14 @@ run "all_features_disabled" {
   assert {
     condition     = output.workspace_url == null
     error_message = "The workspace must not be composed when its feature is disabled."
+  }
+  assert {
+    condition     = output.workspace_id == null
+    error_message = "The workspace ID output must be null when no workspace is managed."
+  }
+  assert {
+    condition     = length(output.pending_endpoint_acceptances) == 0
+    error_message = "No endpoint acceptances can be pending without PrivateLink connectivity."
   }
 }
 
@@ -260,9 +283,102 @@ run "workspace_and_postgres_without_connectivity" {
     error_message = "NCC must not be created without serverless PrivateLink."
   }
   assert {
+    condition     = length(output.pending_endpoint_acceptances) == 0
+    error_message = "No endpoint acceptances can be pending without PrivateLink connectivity."
+  }
+  assert {
+    condition     = output.connectivity.rds_postgres.classic.endpoint_service_id == null && output.connectivity.rds_postgres.serverless.endpoint_service_id == null
+    error_message = "Endpoint service IDs must be null when PrivateLink is not selected."
+  }
+  assert {
     condition     = output.workspace_url == "https://example.cloud.databricks.com"
     error_message = "The workspace URL must contain exactly one scheme."
   }
+}
+
+run "workspace_uses_existing_metastore_without_initial_catalog" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      existing_metastore_name = "jpg-classic-uc-metastore"
+      create_initial_catalog  = false
+    }
+  }
+
+  assert {
+    condition     = output.metastore_id == "11111111-2222-3333-4444-555555555555"
+    error_message = "The workspace must use the existing metastore selected by name."
+  }
+
+  assert {
+    condition     = output.catalog_name == null
+    error_message = "Assignment-only mode must not create an initial catalog."
+  }
+}
+
+run "workspace_with_backend_private_link" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = false
+    }
+    workspace_backend_private_link = {
+      enabled               = true
+      endpoint_subnet_cidrs = ["10.40.34.0/27", "10.40.34.32/27"]
+      public_access_enabled = true
+    }
+  }
+
+  assert {
+    condition     = output.workspace_backend_private_link.enabled && output.workspace_backend_private_link.public_access_enabled
+    error_message = "The workspace must enable back-end PrivateLink while retaining public front-end access."
+  }
+}
+
+run "warn_when_workspace_api_unreachable_from_operator" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    workspace_backend_private_link = {
+      enabled               = true
+      endpoint_subnet_cidrs = ["10.40.34.0/27", "10.40.34.32/27"]
+      public_access_enabled = false
+    }
+  }
+
+  expect_failures = [check.workspace_api_reachable_from_operator]
+}
+
+run "reject_backend_private_link_without_two_endpoint_subnets" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = false
+    }
+    workspace_backend_private_link = {
+      enabled               = true
+      endpoint_subnet_cidrs = ["10.40.34.0/27"]
+    }
+  }
+
+  expect_failures = [var.workspace_backend_private_link]
 }
 
 run "postgres_without_workspace_or_connectivity" {
@@ -471,7 +587,15 @@ run "reject_connectivity_for_disabled_service" {
 }
 
 run "standalone_simulated_on_prem" {
-  command = plan
+  command = apply
+
+  override_resource {
+    target = module.simulated_on_prem[0].aws_instance.host
+    values = {
+      id = "i-0123456789abcdef0"
+    }
+  }
+
   variables {
     databricks_account_id = "00000000-0000-0000-0000-000000000000"
     features = {
@@ -479,6 +603,10 @@ run "standalone_simulated_on_prem" {
       unity_catalog     = false
       simulated_on_prem = true
     }
+  }
+  assert {
+    condition     = output.simulated_on_prem.ssm_command == "aws ssm start-session --target i-0123456789abcdef0 --region us-west-2"
+    error_message = "The SSM command must include the region and omit --profile when no profile is selected."
   }
   assert {
     condition     = output.workspace_url == null
@@ -674,4 +802,362 @@ run "reject_invalid_workspace_tgw_attachment_subnet_count" {
     }
   }
   expect_failures = [var.workspace_network]
+}
+
+run "ssm_command_uses_selected_profile" {
+  command = apply
+
+  override_resource {
+    target = module.simulated_on_prem[0].aws_instance.host
+    values = {
+      id = "i-0123456789abcdef0"
+    }
+  }
+
+  variables {
+    aws_profile           = "sts-lab"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace         = false
+      unity_catalog     = false
+      simulated_on_prem = true
+    }
+  }
+
+  assert {
+    condition     = output.simulated_on_prem.ssm_command == "aws ssm start-session --target i-0123456789abcdef0 --region us-west-2 --profile sts-lab"
+    error_message = "The SSM command must use the AWS profile selected by ./infra."
+  }
+}
+
+run "accept_expected_aws_account_id" {
+  command = plan
+
+  variables {
+    aws_account_id        = "123456789012"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.workspace_url == null
+    error_message = "A valid expected AWS account ID must be accepted."
+  }
+}
+
+run "reject_invalid_aws_account_id" {
+  command = plan
+
+  variables {
+    aws_account_id        = "1234"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  expect_failures = [var.aws_account_id]
+}
+
+run "reject_invalid_databricks_account_id" {
+  command = plan
+
+  variables {
+    databricks_account_id = "not-a-uuid"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  expect_failures = [var.databricks_account_id]
+}
+
+run "metastore_create_is_the_default" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      create_initial_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.metastore_created == true
+    error_message = "Without metastore_mode, the deployment must keep creating a dedicated metastore."
+  }
+}
+
+run "metastore_auto_reuses_regional_metastore" {
+  command = plan
+
+  override_data {
+    target = module.unity_catalog[0].data.databricks_metastores.all
+    values = {
+      ids = { "shared-us-west-2" = "11111111-2222-3333-4444-555555555555" }
+    }
+  }
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      metastore_mode         = "auto"
+      create_initial_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.metastore_created == false && output.metastore_id == "11111111-2222-3333-4444-555555555555"
+    error_message = "Auto mode must assign the metastore that already exists in the workspace region."
+  }
+}
+
+run "reject_ambiguous_auto_metastore" {
+  command = plan
+
+  # Shared accounts can hold several metastores per region; auto mode must not
+  # pick one of them arbitrarily.
+  override_data {
+    target = module.unity_catalog[0].data.databricks_metastores.all
+    values = {
+      ids = {
+        "team-a-us-west-2" = "11111111-2222-3333-4444-555555555555"
+        "team-b-us-west-2" = "22222222-3333-4444-5555-666666666666"
+      }
+    }
+  }
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      metastore_mode         = "auto"
+      create_initial_catalog = false
+    }
+  }
+
+  expect_failures = [output.metastore_id]
+}
+
+run "metastore_auto_ignores_other_regions" {
+  command = plan
+
+  override_data {
+    target = module.unity_catalog[0].data.databricks_metastores.all
+    values = {
+      ids = { "shared-eu-west-1" = "99999999-2222-3333-4444-555555555555" }
+    }
+  }
+
+  override_data {
+    target = module.unity_catalog[0].data.databricks_metastore.candidate
+    values = {
+      id           = "99999999-2222-3333-4444-555555555555"
+      metastore_id = "99999999-2222-3333-4444-555555555555"
+      region       = "eu-west-1"
+    }
+  }
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      metastore_mode         = "auto"
+      create_initial_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.metastore_created == true
+    error_message = "Auto mode must create a metastore when none exists in the workspace region."
+  }
+}
+
+run "metastore_auto_keeps_managing_its_own_metastore" {
+  command = plan
+
+  override_data {
+    target = module.unity_catalog[0].data.databricks_metastores.all
+    values = {
+      ids = { "demo-metastore" = "11111111-2222-3333-4444-555555555555" }
+    }
+  }
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      metastore_mode         = "auto"
+      create_initial_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.metastore_created == true
+    error_message = "A metastore created by auto mode must stay managed on later plans instead of being treated as pre-existing."
+  }
+}
+
+run "reject_auto_metastore_with_existing_name" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      metastore_mode          = "auto"
+      existing_metastore_name = "shared"
+    }
+  }
+
+  expect_failures = [var.unity_catalog]
+}
+
+run "reject_existing_metastore_mode_without_name" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = true
+    }
+    unity_catalog = {
+      metastore_mode = "existing"
+    }
+  }
+
+  expect_failures = [var.unity_catalog]
+}
+
+run "names_derive_from_deployment_id" {
+  command = plan
+
+  variables {
+    deployment_id         = "My_Lab.2026"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.resource_name_prefix == "my-lab-2026"
+    error_message = "The name prefix must be the sanitized deployment ID."
+  }
+}
+
+run "derived_names_start_with_a_letter_and_are_truncated" {
+  command = plan
+
+  variables {
+    deployment_id         = "2026-a-very-long-deployment-identifier-for-testing"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.resource_name_prefix == "d-2026-a-very-long-deploym"
+    error_message = "Derived prefixes must start with a letter and stay within the length budget."
+  }
+}
+
+run "explicit_name_prefix_wins_over_deployment_id" {
+  command = plan
+
+  variables {
+    deployment_id         = "my-lab"
+    name_prefix           = "acme-demo"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.resource_name_prefix == "acme-demo"
+    error_message = "An explicit name_prefix must be used unchanged."
+  }
+}
+
+run "names_fall_back_to_demo" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      unity_catalog = false
+    }
+  }
+
+  assert {
+    condition     = output.resource_name_prefix == "demo"
+    error_message = "Without a deployment ID or name_prefix, names must keep the demo default."
+  }
+}
+
+run "brokers_with_ephemeral_credentials" {
+  command = plan
+
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = false
+      kafka         = true
+      rabbitmq      = true
+    }
+    connectivity = {
+      kafka = {
+        classic    = "private_link"
+        serverless = "private_link"
+      }
+      rabbitmq = {
+        classic    = "private_link"
+        serverless = "none"
+      }
+    }
+    kafka = {
+      ephemeral_credentials = true
+    }
+    rabbitmq = {
+      ephemeral_credentials = true
+    }
+  }
+
+  assert {
+    condition     = output.connectivity.kafka.classic.mode == "private_link" && output.connectivity.rabbitmq.classic.mode == "private_link"
+    error_message = "Brokers with ephemeral credentials must plan with classic PrivateLink."
+  }
 }

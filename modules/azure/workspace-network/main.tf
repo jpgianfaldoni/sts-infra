@@ -61,6 +61,16 @@ resource "azurerm_subnet" "private_endpoint" {
   private_endpoint_network_policies = "Disabled"
 }
 
+resource "azurerm_subnet" "test_vm" {
+  count = var.test_vm_subnet_cidr == null ? 0 : 1
+
+  name                            = "${var.resource_prefix}-test-vm-snet"
+  resource_group_name             = azurerm_resource_group.this.name
+  virtual_network_name            = azurerm_virtual_network.this.name
+  address_prefixes                = [var.test_vm_subnet_cidr]
+  default_outbound_access_enabled = false
+}
+
 resource "azurerm_subnet" "dns" {
   name                            = "${var.resource_prefix}-dns-snet"
   resource_group_name             = azurerm_resource_group.this.name
@@ -113,5 +123,12 @@ resource "azurerm_subnet_nat_gateway_association" "container" {
 
 resource "azurerm_subnet_nat_gateway_association" "dns" {
   subnet_id      = azurerm_subnet.dns.id
+  nat_gateway_id = azurerm_nat_gateway.this.id
+}
+
+resource "azurerm_subnet_nat_gateway_association" "test_vm" {
+  count = var.test_vm_subnet_cidr == null ? 0 : 1
+
+  subnet_id      = azurerm_subnet.test_vm[0].id
   nat_gateway_id = azurerm_nat_gateway.this.id
 }

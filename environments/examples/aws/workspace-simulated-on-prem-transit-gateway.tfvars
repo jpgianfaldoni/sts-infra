@@ -1,6 +1,4 @@
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
-name_prefix           = "acme-hybrid-lab"
-workspace_name        = "acme-hybrid-lab-classic"
 
 features = {
   workspace         = true

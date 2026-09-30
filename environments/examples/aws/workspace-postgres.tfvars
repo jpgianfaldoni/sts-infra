@@ -1,6 +1,4 @@
-databricks_account_id        = "00000000-0000-0000-0000-000000000000"
-name_prefix                  = "acme-demo"
-workspace_name               = "acme-demo-classic"
+databricks_account_id = "00000000-0000-0000-0000-000000000000"
 
 features = {
   workspace     = true
@@ -19,4 +17,9 @@ tags = {
   ManagedBy   = "terraform"
   Environment = "demo"
   Owner       = "platform-team"
+}
+
+# Reuse the account's metastore in the region when one exists; otherwise create one.
+unity_catalog = {
+  metastore_mode = "auto"
 }

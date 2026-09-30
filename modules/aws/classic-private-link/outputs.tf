@@ -11,5 +11,5 @@ output "host" {
 }
 
 output "connection_state" {
-  value = aws_vpc_endpoint.this.state
+  value = aws_vpc_endpoint_connection_accepter.this.vpc_endpoint_state
 }

@@ -23,6 +23,11 @@ variable "endpoint_service_name" {
   type        = string
 }
 
+variable "endpoint_service_id" {
+  description = "ID of the same-account endpoint service. The classic endpoint connection is accepted automatically; serverless connections to the same service still require review."
+  type        = string
+}
+
 variable "service_port" {
   description = "TCP port exposed by the target service."
   type        = number

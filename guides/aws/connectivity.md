@@ -97,13 +97,21 @@ Serverless PrivateLink continues to use the original service hostname listed in 
 
 ## Endpoint acceptance
 
-Endpoint services require acceptance. Serverless NCC endpoints are cross-account and remain unusable until the expected Databricks-created endpoint is explicitly accepted. Check both classic endpoint IDs and NCC rule states with:
+Endpoint services require acceptance. Classic interface endpoints are created
+by the same Terraform configuration in the same AWS account, so Terraform
+accepts their connections automatically (`aws_vpc_endpoint_connection_accepter`
+in the `classic-private-link` module). Serverless NCC endpoints are
+cross-account and remain unusable until the expected Databricks-created
+endpoint is explicitly accepted. List the connections that still need a
+decision with:
 
 ```bash
 ./infra endpoints aws status environments/local/my-aws.tfvars
 ```
 
-After reviewing the service and endpoint IDs, accept only the expected connection:
+Each `pending_endpoint_acceptances` entry contains the `service_id` and
+`endpoint_id` to review. After reviewing them, accept only the expected
+connection:
 
 ```bash
 ./infra endpoints aws accept environments/local/my-aws.tfvars \

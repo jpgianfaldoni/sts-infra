@@ -4,6 +4,14 @@ data "aws_availability_zones" "available" {
 
 locals {
   availability_zones = var.availability_zones != null ? var.availability_zones : slice(data.aws_availability_zones.available.names, 0, 2)
+
+  # Names derived from the deployment ID must satisfy the strictest consumers:
+  # lowercase letters, digits, and single hyphens (S3, RDS), a leading letter
+  # (RDS identifiers), and room for the longest suffix within 63 characters.
+  deployment_name = var.deployment_id == null ? "" : trim(substr(trim(replace(lower(var.deployment_id), "/[^a-z0-9]+/", "-"), "-"), 0, 24), "-")
+  derived_prefix  = local.deployment_name == "" ? null : (can(regex("^[a-z]", local.deployment_name)) ? local.deployment_name : "d-${local.deployment_name}")
+  name_prefix     = coalesce(var.name_prefix, local.derived_prefix, "demo")
+  workspace_name  = coalesce(var.workspace_name, "${local.name_prefix}-classic")
 }
 
 module "workspace" {
@@ -12,16 +20,18 @@ module "workspace" {
   providers = { databricks.mws = databricks.mws
   }
 
-  databricks_account_id     = var.databricks_account_id
-  region                    = var.region
-  workspace_name            = var.workspace_name
-  resource_prefix           = var.name_prefix
-  vpc_cidr                  = var.workspace_network.vpc_cidr
-  availability_zones        = local.availability_zones
-  private_subnet_cidrs      = var.workspace_network.private_subnet_cidrs
-  public_subnet_cidr        = var.workspace_network.public_subnet_cidr
-  force_destroy_root_bucket = var.allow_destructive_demo_cleanup
-  tags                      = var.tags
+  databricks_account_id          = var.databricks_account_id
+  region                         = var.region
+  workspace_name                 = local.workspace_name
+  resource_prefix                = local.name_prefix
+  vpc_cidr                       = var.workspace_network.vpc_cidr
+  availability_zones             = local.availability_zones
+  private_subnet_cidrs           = var.workspace_network.private_subnet_cidrs
+  public_subnet_cidr             = var.workspace_network.public_subnet_cidr
+  backend_private_link           = var.workspace_backend_private_link
+  force_destroy_root_bucket      = var.allow_destructive_demo_cleanup
+  tags                           = var.tags
+  network_connectivity_config_id = local.network_connectivity_config_id
 }
 
 module "unity_catalog" {
@@ -31,13 +41,16 @@ module "unity_catalog" {
     databricks.workspace = databricks.workspace
   }
 
-  databricks_account_id = var.databricks_account_id
-  workspace_id          = module.workspace[0].workspace_id
-  region                = var.region
-  resource_prefix       = var.name_prefix
-  catalog_name          = var.initial_catalog_name
-  force_destroy         = var.allow_destructive_demo_cleanup
-  tags                  = var.tags
+  databricks_account_id   = var.databricks_account_id
+  workspace_id            = module.workspace[0].workspace_id
+  region                  = var.region
+  resource_prefix         = local.name_prefix
+  metastore_mode          = var.unity_catalog.existing_metastore_name != null ? "existing" : var.unity_catalog.metastore_mode
+  existing_metastore_name = var.unity_catalog.existing_metastore_name
+  create_initial_catalog  = var.unity_catalog.create_initial_catalog
+  catalog_name            = var.initial_catalog_name
+  force_destroy           = var.allow_destructive_demo_cleanup
+  tags                    = var.tags
 }
 
 module "glue_federation" {
@@ -47,7 +60,7 @@ module "glue_federation" {
     databricks.workspace = databricks.workspace
   }
 
-  name_prefix                        = var.name_prefix
+  name_prefix                        = local.name_prefix
   region                             = var.region
   databricks_connectivity_enabled    = var.glue_federation.databricks_connectivity_enabled
   databricks_metastore_assignment_id = try(module.unity_catalog[0].metastore_assignment_id, null)
@@ -61,9 +74,11 @@ module "glue_federation" {
 module "rds_postgres" {
   count                          = var.features.rds_postgres ? 1 : 0
   source                         = "../../modules/aws/rds-postgres"
-  name_prefix                    = "${var.name_prefix}-postgres"
+  name_prefix                    = "${local.name_prefix}-postgres"
   region                         = var.region
   vpc_cidr                       = var.database_networks.rds_postgres
+  engine_version                 = var.rds_postgres.engine_version
+  lakeflow_connect_enabled       = var.rds_postgres.lakeflow_connect_enabled
   enable_classic_private_link    = var.connectivity.rds_postgres.classic == "private_link"
   enable_serverless_private_link = var.connectivity.rds_postgres.serverless == "private_link"
   deletion_protection            = !var.allow_destructive_demo_cleanup
@@ -74,7 +89,7 @@ module "rds_postgres" {
 module "rds_sql_server" {
   count                          = var.features.rds_sql_server ? 1 : 0
   source                         = "../../modules/aws/rds-sql-server"
-  name_prefix                    = "${var.name_prefix}-sqlserver"
+  name_prefix                    = "${local.name_prefix}-sqlserver"
   region                         = var.region
   vpc_cidr                       = var.database_networks.rds_sql_server
   enable_classic_private_link    = var.connectivity.rds_sql_server.classic == "private_link"
@@ -87,7 +102,7 @@ module "rds_sql_server" {
 module "aurora_postgres" {
   count                          = var.features.aurora_postgres ? 1 : 0
   source                         = "../../modules/aws/aurora-postgres"
-  name_prefix                    = "${var.name_prefix}-aurora"
+  name_prefix                    = "${local.name_prefix}-aurora"
   region                         = var.region
   vpc_cidr                       = var.database_networks.aurora_postgres
   enable_proxy                   = var.features.aurora_proxy
@@ -101,24 +116,26 @@ module "aurora_postgres" {
 module "rabbitmq" {
   count                          = var.features.rabbitmq ? 1 : 0
   source                         = "../../modules/aws/rabbitmq"
-  name_prefix                    = "${var.name_prefix}-rabbitmq"
+  name_prefix                    = "${local.name_prefix}-rabbitmq"
   region                         = var.region
   vpc_cidr                       = var.database_networks.rabbitmq
   enable_classic_private_link    = var.connectivity.rabbitmq.classic == "private_link"
   enable_serverless_private_link = var.connectivity.rabbitmq.serverless == "private_link"
+  ephemeral_credentials          = var.rabbitmq.ephemeral_credentials
   tags                           = var.tags
 }
 
 module "kafka" {
   count                          = var.features.kafka ? 1 : 0
   source                         = "../../modules/aws/kafka"
-  name_prefix                    = "${var.name_prefix}-kafka"
+  name_prefix                    = "${local.name_prefix}-kafka"
   region                         = var.region
   vpc_cidr                       = var.database_networks.kafka
   instance_type                  = var.kafka.instance_type
   kafka_image                    = var.kafka.image
   topic_name                     = var.kafka.topic_name
   producer_interval_seconds      = var.kafka.producer_interval_seconds
+  ephemeral_credentials          = var.kafka.ephemeral_credentials
   enable_classic_private_link    = var.connectivity.kafka.classic == "private_link"
   enable_serverless_private_link = var.connectivity.kafka.serverless == "private_link"
   tags                           = var.tags
@@ -128,7 +145,7 @@ module "simulated_on_prem" {
   count  = var.features.simulated_on_prem ? 1 : 0
   source = "../../modules/aws/simulated-on-prem"
 
-  name_prefix                    = var.name_prefix
+  name_prefix                    = local.name_prefix
   region                         = var.region
   availability_zone              = local.availability_zones[0]
   vpc_cidr                       = var.simulated_on_prem.vpc_cidr
@@ -171,7 +188,7 @@ module "simulated_on_prem_transit_gateway" {
   count  = var.features.simulated_on_prem && var.connectivity.simulated_on_prem.classic == "transit_gateway" ? 1 : 0
   source = "../../modules/aws/transit-gateway"
 
-  name                              = "${var.name_prefix}-sim-on-prem"
+  name                              = "${local.name_prefix}-sim-on-prem"
   availability_zones                = local.availability_zones
   workspace_vpc_id                  = module.workspace[0].vpc_id
   workspace_vpc_cidr                = module.workspace[0].vpc_cidr
@@ -195,11 +212,12 @@ module "rds_postgres_classic_private_link" {
   count  = var.features.rds_postgres && var.connectivity.rds_postgres.classic == "private_link" ? 1 : 0
   source = "../../modules/aws/classic-private-link"
 
-  name                     = "${var.name_prefix}-postgres-classic"
+  name                     = "${local.name_prefix}-postgres-classic"
   vpc_id                   = module.workspace[0].vpc_id
   subnet_ids               = module.workspace[0].private_subnet_ids
   client_security_group_id = module.workspace[0].security_group_id
   endpoint_service_name    = module.rds_postgres[0].endpoint_service_name
+  endpoint_service_id      = module.rds_postgres[0].endpoint_service_id
   service_port             = module.rds_postgres[0].port
   tags                     = var.tags
   depends_on               = [module.rds_postgres]
@@ -209,11 +227,12 @@ module "rds_sql_server_classic_private_link" {
   count  = var.features.rds_sql_server && var.connectivity.rds_sql_server.classic == "private_link" ? 1 : 0
   source = "../../modules/aws/classic-private-link"
 
-  name                     = "${var.name_prefix}-sqlserver-classic"
+  name                     = "${local.name_prefix}-sqlserver-classic"
   vpc_id                   = module.workspace[0].vpc_id
   subnet_ids               = module.workspace[0].private_subnet_ids
   client_security_group_id = module.workspace[0].security_group_id
   endpoint_service_name    = module.rds_sql_server[0].endpoint_service_name
+  endpoint_service_id      = module.rds_sql_server[0].endpoint_service_id
   service_port             = module.rds_sql_server[0].port
   tags                     = var.tags
   depends_on               = [module.rds_sql_server]
@@ -223,11 +242,12 @@ module "aurora_postgres_classic_private_link" {
   count  = var.features.aurora_postgres && var.connectivity.aurora_postgres.classic == "private_link" ? 1 : 0
   source = "../../modules/aws/classic-private-link"
 
-  name                     = "${var.name_prefix}-aurora-classic"
+  name                     = "${local.name_prefix}-aurora-classic"
   vpc_id                   = module.workspace[0].vpc_id
   subnet_ids               = module.workspace[0].private_subnet_ids
   client_security_group_id = module.workspace[0].security_group_id
   endpoint_service_name    = module.aurora_postgres[0].endpoint_service_name
+  endpoint_service_id      = module.aurora_postgres[0].endpoint_service_id
   service_port             = module.aurora_postgres[0].port
   tags                     = var.tags
   depends_on               = [module.aurora_postgres]
@@ -237,11 +257,12 @@ module "rabbitmq_classic_private_link" {
   count  = var.features.rabbitmq && var.connectivity.rabbitmq.classic == "private_link" ? 1 : 0
   source = "../../modules/aws/classic-private-link"
 
-  name                     = "${var.name_prefix}-rabbitmq-classic"
+  name                     = "${local.name_prefix}-rabbitmq-classic"
   vpc_id                   = module.workspace[0].vpc_id
   subnet_ids               = module.workspace[0].private_subnet_ids
   client_security_group_id = module.workspace[0].security_group_id
   endpoint_service_name    = module.rabbitmq[0].endpoint_service_name
+  endpoint_service_id      = module.rabbitmq[0].endpoint_service_id
   service_port             = module.rabbitmq[0].port
   tags                     = var.tags
   depends_on               = [module.rabbitmq]
@@ -251,11 +272,12 @@ module "kafka_classic_private_link" {
   count  = var.features.kafka && var.connectivity.kafka.classic == "private_link" ? 1 : 0
   source = "../../modules/aws/classic-private-link"
 
-  name                     = "${var.name_prefix}-kafka-classic"
+  name                     = "${local.name_prefix}-kafka-classic"
   vpc_id                   = module.workspace[0].vpc_id
   subnet_ids               = module.workspace[0].private_subnet_ids
   client_security_group_id = module.workspace[0].security_group_id
   endpoint_service_name    = module.kafka[0].endpoint_service_name
+  endpoint_service_id      = module.kafka[0].endpoint_service_id
   service_port             = module.kafka[0].private_link_port
   private_dns_name         = module.kafka[0].private_link_host
   create_private_dns_alias = true
@@ -298,22 +320,63 @@ locals {
   )
 }
 
+# Derived from variables only: the workspace depends on the NCC, so the NCC
+# must not depend on anything that depends on the workspace.
+locals {
+  serverless_private_link_enabled = var.features.workspace && anytrue([
+    var.features.rds_postgres && var.connectivity.rds_postgres.serverless == "private_link",
+    var.features.rds_sql_server && var.connectivity.rds_sql_server.serverless == "private_link",
+    var.features.aurora_postgres && var.connectivity.aurora_postgres.serverless == "private_link",
+    var.features.rabbitmq && var.connectivity.rabbitmq.serverless == "private_link",
+    var.features.kafka && var.connectivity.kafka.serverless == "private_link",
+    var.features.simulated_on_prem && var.connectivity.simulated_on_prem.serverless == "private_link",
+  ])
+  network_connectivity_config_id = !local.serverless_private_link_enabled ? null : (
+    var.existing_network_connectivity_config_id != null
+    ? var.existing_network_connectivity_config_id
+    : module.network_connectivity_config[0].network_connectivity_config_id
+  )
+}
+
+# Created before the workspace and destroyed after it: Databricks refuses to
+# delete an NCC that is still attached to a workspace.
+module "network_connectivity_config" {
+  count  = local.serverless_private_link_enabled && var.existing_network_connectivity_config_id == null ? 1 : 0
+  source = "../../modules/aws/network-connectivity-config"
+  providers = { databricks.mws = databricks.mws
+  }
+  name   = "${local.name_prefix}-ncc"
+  region = var.region
+}
+
 module "ncc" {
   count  = length(local.ncc_rules) > 0 ? 1 : 0
   source = "../../modules/aws/ncc"
   providers = { databricks.mws = databricks.mws
   }
-  name                   = "${var.name_prefix}-ncc"
-  region                 = var.region
-  workspace_id           = module.workspace[0].workspace_id
-  private_endpoint_rules = local.ncc_rules
-  depends_on             = [module.rds_postgres, module.rds_sql_server, module.aurora_postgres, module.rabbitmq, module.kafka, module.simulated_on_prem]
+  network_connectivity_config_id = local.network_connectivity_config_id
+  private_endpoint_rules         = local.ncc_rules
+  depends_on                     = [module.rds_postgres, module.rds_sql_server, module.aurora_postgres, module.rabbitmq, module.kafka, module.simulated_on_prem]
+}
+
+moved {
+  from = module.ncc[0].databricks_mws_network_connectivity_config.this[0]
+  to   = module.network_connectivity_config[0].databricks_mws_network_connectivity_config.this
+}
+
+# The workspace's network_connectivity_config_id now attaches the NCC. Deleting
+# a binding does not detach it, so forget the old binding resource.
+removed {
+  from = module.ncc.databricks_mws_ncc_binding.this
+  lifecycle {
+    destroy = false
+  }
 }
 
 module "postgres_peering" {
   count                     = var.features.rds_postgres && var.connectivity.rds_postgres.classic == "peering" ? 1 : 0
   source                    = "../../modules/aws/vpc-peering"
-  name                      = "${var.name_prefix}-postgres"
+  name                      = "${local.name_prefix}-postgres"
   client_vpc_id             = module.workspace[0].vpc_id
   client_vpc_cidr           = module.workspace[0].vpc_cidr
   client_route_table_ids    = module.workspace[0].private_route_table_ids
@@ -329,7 +392,7 @@ module "postgres_peering" {
 module "sqlserver_peering" {
   count                     = var.features.rds_sql_server && var.connectivity.rds_sql_server.classic == "peering" ? 1 : 0
   source                    = "../../modules/aws/vpc-peering"
-  name                      = "${var.name_prefix}-sqlserver"
+  name                      = "${local.name_prefix}-sqlserver"
   client_vpc_id             = module.workspace[0].vpc_id
   client_vpc_cidr           = module.workspace[0].vpc_cidr
   client_route_table_ids    = module.workspace[0].private_route_table_ids
@@ -345,7 +408,7 @@ module "sqlserver_peering" {
 module "aurora_peering" {
   count                     = var.features.aurora_postgres && var.connectivity.aurora_postgres.classic == "peering" ? 1 : 0
   source                    = "../../modules/aws/vpc-peering"
-  name                      = "${var.name_prefix}-aurora"
+  name                      = "${local.name_prefix}-aurora"
   client_vpc_id             = module.workspace[0].vpc_id
   client_vpc_cidr           = module.workspace[0].vpc_cidr
   client_route_table_ids    = module.workspace[0].private_route_table_ids
@@ -361,7 +424,7 @@ module "aurora_peering" {
 module "rabbitmq_peering" {
   count                     = var.features.rabbitmq && var.connectivity.rabbitmq.classic == "peering" ? 1 : 0
   source                    = "../../modules/aws/vpc-peering"
-  name                      = "${var.name_prefix}-rabbitmq"
+  name                      = "${local.name_prefix}-rabbitmq"
   client_vpc_id             = module.workspace[0].vpc_id
   client_vpc_cidr           = module.workspace[0].vpc_cidr
   client_route_table_ids    = module.workspace[0].private_route_table_ids
@@ -377,7 +440,7 @@ module "rabbitmq_peering" {
 module "kafka_peering" {
   count                     = var.features.kafka && var.connectivity.kafka.classic == "peering" ? 1 : 0
   source                    = "../../modules/aws/vpc-peering"
-  name                      = "${var.name_prefix}-kafka"
+  name                      = "${local.name_prefix}-kafka"
   client_vpc_id             = module.workspace[0].vpc_id
   client_vpc_cidr           = module.workspace[0].vpc_cidr
   client_route_table_ids    = module.workspace[0].private_route_table_ids

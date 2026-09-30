@@ -22,3 +22,6 @@ output "security_group_id" {
 output "endpoint_service_name" {
   value = try(aws_vpc_endpoint_service.this[0].service_name, null)
 }
+output "endpoint_service_id" {
+  value = try(aws_vpc_endpoint_service.this[0].id, null)
+}

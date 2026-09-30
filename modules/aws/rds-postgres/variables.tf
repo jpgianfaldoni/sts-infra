@@ -15,6 +15,18 @@ variable "engine_version" {
   type    = string
   default = null
 }
+variable "lakeflow_connect_enabled" {
+  description = "Enable logical-replication parameters and a dedicated write-only replication credential for Lakeflow Connect source setup."
+  type        = bool
+  default     = false
+
+  validation {
+    condition = !var.lakeflow_connect_enabled || (
+      try(tonumber(split(".", var.engine_version)[0]), 0) >= 13
+    )
+    error_message = "lakeflow_connect_enabled requires an explicit PostgreSQL engine_version of 13 or newer."
+  }
+}
 variable "database_name" {
   type    = string
   default = "demo"

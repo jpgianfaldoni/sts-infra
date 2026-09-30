@@ -4,9 +4,27 @@ resource "random_string" "suffix" {
   special = false
 }
 resource "random_password" "broker" {
+  count = var.ephemeral_credentials ? 0 : 1
+
   length           = 32
   special          = true
   override_special = "!#$%&*()-_=+"
+}
+
+# With ephemeral credentials the password exists only while Terraform runs: it
+# is written once to Secrets Manager through a write-only attribute and never
+# stored in state. The broker reads it from Secrets Manager at boot.
+ephemeral "random_password" "broker" {
+  count = var.ephemeral_credentials ? 1 : 0
+
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+"
+}
+
+moved {
+  from = random_password.broker
+  to   = random_password.broker[0]
 }
 locals {
   name                = "${var.name_prefix}-${random_string.suffix.result}"
@@ -106,9 +124,13 @@ resource "aws_secretsmanager_secret" "broker" {
 }
 resource "aws_secretsmanager_secret_version" "broker" {
   secret_id = aws_secretsmanager_secret.broker.id
-  secret_string = jsonencode({ username = var.broker_username
-    password = random_password.broker.result
+  secret_string = var.ephemeral_credentials ? null : jsonencode({ username = var.broker_username
+    password = one(random_password.broker[*].result)
   })
+  secret_string_wo = var.ephemeral_credentials ? jsonencode({ username = var.broker_username
+    password = one(ephemeral.random_password.broker[*].result)
+  }) : null
+  secret_string_wo_version = var.ephemeral_credentials ? 1 : null
 }
 resource "aws_iam_role" "broker" {
   name = "${local.name}-broker"
@@ -191,6 +213,11 @@ resource "aws_instance" "broker" {
 depends_on = [aws_iam_role_policy.secret, aws_iam_role_policy_attachment.ssm, aws_route.private, aws_secretsmanager_secret_version.broker]
 tags = merge(var.tags, { Name = "${local.name}-broker"
 })
+
+# A newer Amazon Linux image must not replace a running lab broker.
+lifecycle {
+  ignore_changes = [ami]
+}
 }
 
 resource "aws_security_group" "nlb" {
@@ -218,7 +245,7 @@ resource "aws_vpc_security_group_ingress_rule" "broker_from_nlb" {
 }
 resource "aws_lb" "this" {
   count                                                        = local.enable_private_link ? 1 : 0
-  name                                                         = substr("${local.name}-pl", 0, 32)
+  name                                                         = trimsuffix(substr("${local.name}-pl", 0, 32), "-")
   internal                                                     = true
   load_balancer_type                                           = "network"
   subnets                                                      = aws_subnet.private[*].id
@@ -229,7 +256,7 @@ resource "aws_lb" "this" {
 }
 resource "aws_lb_target_group" "this" {
   count              = local.enable_private_link ? 1 : 0
-  name               = substr("${local.name}-amqp", 0, 32)
+  name               = trimsuffix(substr("${local.name}-amqp", 0, 32), "-")
   port               = local.port
   protocol           = "TCP"
   target_type        = "instance"

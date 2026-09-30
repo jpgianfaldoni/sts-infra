@@ -30,18 +30,20 @@ both paths return an address that the client can actually reach:
 | Serverless `private_link` | NLB hostname on `9094` | NCC-managed interface endpoint |
 
 The classic and serverless PrivateLink consumers share the same internal NLB
-and endpoint service. Each endpoint connection must still be reviewed and
-accepted explicitly.
+and endpoint service, which requires acceptance. Terraform accepts the classic
+endpoint it creates in the same account; the serverless NCC connection must be
+reviewed and accepted explicitly.
 
 ## Deploy the example
 
-Copy the example into the ignored local environment directory and provide your
-authentication profile values:
+Copy the example into the ignored local environment directory, then let
+`./infra` select and verify the AWS and Databricks profiles:
 
 ```bash
 cp environments/examples/aws/workspace-kafka-streaming.tfvars \
   environments/local/my-kafka.tfvars
 
+./infra setup aws environments/local/my-kafka.tfvars --yes
 ./infra validate aws
 ./infra plan aws environments/local/my-kafka.tfvars
 # Review and authorize the saved plan before applying it.

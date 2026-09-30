@@ -20,16 +20,68 @@ variable "databricks_workspace_profile" {
   default     = null
   nullable    = true
 }
+variable "aws_account_id" {
+  description = "Optional expected AWS account ID. When set, the AWS provider refuses to operate in any other account."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.aws_account_id == null || can(regex("^[0-9]{12}$", var.aws_account_id))
+    error_message = "aws_account_id must be null or a 12-digit AWS account ID."
+  }
+}
 variable "databricks_account_id" {
   type = string
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.databricks_account_id))
+    error_message = "databricks_account_id must be a Databricks account UUID."
+  }
+}
+variable "existing_network_connectivity_config_id" {
+  description = "Optional existing Databricks NCC ID to reuse for serverless private endpoint rules."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.existing_network_connectivity_config_id == null || trimspace(var.existing_network_connectivity_config_id) != ""
+    error_message = "existing_network_connectivity_config_id must be null or a non-empty NCC ID."
+  }
+}
+variable "deployment_id" {
+  description = "Deployment ID supplied by ./infra (the tfvars filename or INFRA_DEPLOYMENT_ID). Resource names derive from it when name_prefix is not set."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.deployment_id == null || can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", var.deployment_id))
+    error_message = "deployment_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}."
+  }
 }
 variable "name_prefix" {
-  type    = string
-  default = "demo"
+  description = "Prefix for resource names. When null, it is derived from deployment_id (lowercased, at most 24 characters), or \"demo\" when neither is set."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.name_prefix == null || trimspace(coalesce(var.name_prefix, " ")) != ""
+    error_message = "name_prefix must be null or a non-empty string."
+  }
 }
 variable "workspace_name" {
-  type    = string
-  default = "demo-classic"
+  description = "Databricks workspace name. When null, it is \"<name prefix>-classic\"."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.workspace_name == null || trimspace(coalesce(var.workspace_name, " ")) != ""
+    error_message = "workspace_name must be null or a non-empty string."
+  }
 }
 variable "availability_zones" {
   description = "Optional pair of availability zones. When omitted, the first two available zones in var.region are selected."
@@ -66,6 +118,55 @@ variable "workspace_network" {
     error_message = "workspace_network must provide exactly two valid IPv4 Transit Gateway attachment subnet CIDRs."
   }
 }
+variable "workspace_backend_private_link" {
+  description = "Optional back-end PrivateLink for classic compute-to-control-plane traffic. Public workspace access remains enabled by default."
+  type = object({
+    enabled               = optional(bool, false)
+    endpoint_subnet_cidrs = optional(list(string), [])
+    public_access_enabled = optional(bool, true)
+  })
+  default = {}
+
+  validation {
+    condition = !var.workspace_backend_private_link.enabled || (
+      length(var.workspace_backend_private_link.endpoint_subnet_cidrs) == 2 &&
+      alltrue([
+        for cidr in var.workspace_backend_private_link.endpoint_subnet_cidrs :
+        can(cidrnetmask(cidr)) && !strcontains(cidr, ":")
+      ])
+    )
+    error_message = "workspace_backend_private_link requires exactly two valid IPv4 endpoint subnet CIDRs when enabled."
+  }
+}
+variable "unity_catalog" {
+  description = "Unity Catalog metastore selection and optional initial catalog resources. metastore_mode: create (a dedicated metastore), existing (existing_metastore_name), or auto (reuse the account's metastore in the region, otherwise create one)."
+  type = object({
+    metastore_mode          = optional(string, "create")
+    existing_metastore_name = optional(string)
+    create_initial_catalog  = optional(bool, true)
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["create", "existing", "auto"], var.unity_catalog.metastore_mode)
+    error_message = "unity_catalog.metastore_mode must be create, existing, or auto."
+  }
+
+  validation {
+    condition     = var.unity_catalog.existing_metastore_name == null || trimspace(coalesce(var.unity_catalog.existing_metastore_name, " ")) != ""
+    error_message = "unity_catalog.existing_metastore_name must be null or a non-empty metastore name."
+  }
+
+  validation {
+    condition     = var.unity_catalog.metastore_mode != "existing" || var.unity_catalog.existing_metastore_name != null
+    error_message = "unity_catalog.metastore_mode = \"existing\" requires unity_catalog.existing_metastore_name."
+  }
+
+  validation {
+    condition     = var.unity_catalog.metastore_mode != "auto" || var.unity_catalog.existing_metastore_name == null
+    error_message = "unity_catalog.existing_metastore_name selects a specific metastore; do not combine it with metastore_mode = \"auto\"."
+  }
+}
 variable "glue_federation" {
   description = "AWS Glue federation configuration, with optional Databricks Unity Catalog resources."
   type = object({
@@ -92,6 +193,21 @@ variable "glue_federation" {
       var.features.unity_catalog
     )
     error_message = "Glue federation Databricks connectivity requires the glue_federation, workspace, and unity_catalog features."
+  }
+}
+variable "rds_postgres" {
+  description = "RDS PostgreSQL engine and Lakeflow Connect source configuration."
+  type = object({
+    engine_version           = optional(string)
+    lakeflow_connect_enabled = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition = !var.rds_postgres.lakeflow_connect_enabled || (
+      try(tonumber(split(".", var.rds_postgres.engine_version)[0]), 0) >= 13
+    )
+    error_message = "rds_postgres.lakeflow_connect_enabled requires an explicit PostgreSQL engine_version of 13 or newer."
   }
 }
 variable "features" {
@@ -254,6 +370,7 @@ variable "kafka" {
     image                     = optional(string, "apache/kafka:3.9.1")
     topic_name                = optional(string, "demo-events")
     producer_interval_seconds = optional(number, 1)
+    ephemeral_credentials     = optional(bool, false)
   })
   default = {}
 
@@ -261,6 +378,13 @@ variable "kafka" {
     condition     = var.kafka.producer_interval_seconds >= 1 && var.kafka.producer_interval_seconds <= 3600
     error_message = "kafka.producer_interval_seconds must be between 1 and 3600."
   }
+}
+variable "rabbitmq" {
+  description = "Configuration for the self-managed RabbitMQ lab broker."
+  type = object({
+    ephemeral_credentials = optional(bool, false)
+  })
+  default = {}
 }
 variable "initial_catalog_name" {
   type    = string

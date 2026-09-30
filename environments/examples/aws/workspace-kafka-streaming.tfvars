@@ -1,6 +1,4 @@
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
-name_prefix           = "acme-kafka"
-workspace_name        = "acme-kafka-classic"
 
 features = {
   workspace       = true
@@ -25,6 +23,8 @@ connectivity = {
 kafka = {
   topic_name                = "demo-events"
   producer_interval_seconds = 1
+  # The broker password is written only to Secrets Manager, never to state.
+  ephemeral_credentials = true
 }
 
 allow_destructive_demo_cleanup = true
@@ -32,4 +32,9 @@ allow_destructive_demo_cleanup = true
 tags = {
   ManagedBy   = "terraform"
   Environment = "demo"
+}
+
+# Reuse the account's metastore in the region when one exists; otherwise create one.
+unity_catalog = {
+  metastore_mode = "auto"
 }

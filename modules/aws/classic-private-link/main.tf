@@ -33,6 +33,25 @@ resource "aws_vpc_endpoint" "this" {
   tags                = merge(var.tags, { Name = "${var.name}-endpoint" })
 }
 
+# The endpoint service requires acceptance so that serverless NCC connections
+# are reviewed explicitly. This classic endpoint is created by the same
+# configuration in the same account, so its connection is accepted here.
+#
+# The service registers a new connection shortly after the endpoint reports
+# pendingAcceptance. An earlier accept call is silently ignored and the AWS
+# provider then waits 20 minutes, so give the registration time first.
+resource "time_sleep" "connection_registration" {
+  create_duration = "60s"
+  triggers = {
+    vpc_endpoint_id = aws_vpc_endpoint.this.id
+  }
+}
+
+resource "aws_vpc_endpoint_connection_accepter" "this" {
+  vpc_endpoint_service_id = var.endpoint_service_id
+  vpc_endpoint_id         = time_sleep.connection_registration.triggers["vpc_endpoint_id"]
+}
+
 resource "aws_route53_zone" "endpoint" {
   count = var.create_private_dns_alias ? 1 : 0
 
