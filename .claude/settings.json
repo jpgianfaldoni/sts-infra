@@ -6,7 +6,14 @@
       "Bash(./infra doctor *)",
       "Bash(./infra output *)",
       "Bash(./infra plan *)",
-      "Bash(./infra endpoints aws status *)"
+      "Bash(./infra endpoints aws status *)",
+      "Bash(./infra endpoints azure status *)",
+      "Bash(./infra templates*)",
+      "Bash(./infra explain *)",
+      "Bash(./infra ls*)",
+      "Bash(./infra status *)",
+      "Bash(./infra targets)",
+      "Bash(./infra targets --json)"
     ],
     "ask": [
       "Bash(./infra setup *)",
@@ -18,7 +25,13 @@
       "Bash(./infra seed *)",
       "Bash(./infra state-migrate *)",
       "Bash(./infra endpoints aws accept *)",
-      "Bash(./infra endpoints aws reject *)"
+      "Bash(./infra endpoints aws reject *)",
+      "Bash(./infra endpoints azure approve *)",
+      "Bash(./infra endpoints azure reject *)",
+      "Bash(./infra new *)",
+      "Bash(./infra targets add *)",
+      "Bash(./infra targets remove *)",
+      "Bash(./infra verify *)"
     ],
     "deny": [
       "Read(~/.aws/credentials)",

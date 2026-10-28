@@ -34,8 +34,10 @@ module "workspace" {
   network_connectivity_config_id = local.network_connectivity_config_id
 }
 
+# Workspace-level modules wait for the second stage of a new deployment; see
+# var.workspace_resources_enabled.
 module "unity_catalog" {
-  count  = var.features.unity_catalog ? 1 : 0
+  count  = var.features.unity_catalog && var.workspace_resources_enabled ? 1 : 0
   source = "../../modules/aws/unity-catalog"
   providers = { databricks.mws = databricks.mws
     databricks.workspace = databricks.workspace
@@ -62,7 +64,7 @@ module "glue_federation" {
 
   name_prefix                        = local.name_prefix
   region                             = var.region
-  databricks_connectivity_enabled    = var.glue_federation.databricks_connectivity_enabled
+  databricks_connectivity_enabled    = var.glue_federation.databricks_connectivity_enabled && var.workspace_resources_enabled
   databricks_metastore_assignment_id = try(module.unity_catalog[0].metastore_assignment_id, null)
   databricks_unity_catalog_iam_arn   = var.glue_federation.databricks_unity_catalog_iam_arn
   service_credential_external_id     = var.glue_federation.service_credential_external_id

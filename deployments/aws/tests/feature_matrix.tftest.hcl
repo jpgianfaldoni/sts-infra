@@ -1161,3 +1161,188 @@ run "brokers_with_ephemeral_credentials" {
     error_message = "Brokers with ephemeral credentials must plan with classic PrivateLink."
   }
 }
+
+run "lab_check_seeds_postgres_over_classic_peering" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      rds_postgres = true
+    }
+    connectivity = {
+      rds_postgres = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  assert {
+    condition     = keys(output.lab_check.checks) == ["rds_postgres_classic"]
+    error_message = "Only the configured classic path must be checked."
+  }
+  assert {
+    condition     = output.lab_check.checks.rds_postgres_classic.engine == "postgresql" && output.lab_check.checks.rds_postgres_classic.seeded
+    error_message = "The PostgreSQL check must load the sample data."
+  }
+  assert {
+    condition     = length(output.lab_check.credentials) == 1 && output.lab_check.credentials[0].username_key == "rds_postgres-username"
+    error_message = "./infra verify must copy the PostgreSQL credentials into the scope."
+  }
+  assert {
+    condition     = output.deployment_stage == "complete"
+    error_message = "A plan without the stage override is the complete stage."
+  }
+}
+
+run "foundation_stage_defers_workspace_resources" {
+  command = plan
+  variables {
+    databricks_account_id       = "00000000-0000-0000-0000-000000000000"
+    workspace_resources_enabled = false
+    features = {
+      workspace     = true
+      unity_catalog = true
+      rds_postgres  = true
+    }
+    connectivity = {
+      rds_postgres = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  assert {
+    condition     = output.lab_check == null && output.metastore_created == null
+    error_message = "The foundation stage must not create workspace-level resources."
+  }
+  assert {
+    condition     = output.deployment_stage == "foundation"
+    error_message = "The foundation stage must be reported."
+  }
+  assert {
+    condition     = output.connectivity.rds_postgres.classic.mode == "peering"
+    error_message = "The foundation stage still creates the network path."
+  }
+}
+
+run "lab_check_serverless_runs_after_classic" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace      = true
+      unity_catalog  = false
+      rds_sql_server = true
+    }
+    connectivity = {
+      rds_sql_server = {
+        classic    = "private_link"
+        serverless = "private_link"
+      }
+    }
+  }
+  assert {
+    condition     = keys(output.lab_check.checks) == ["rds_sql_server_classic", "rds_sql_server_serverless"]
+    error_message = "Both configured paths must be checked."
+  }
+  assert {
+    condition = (
+      output.lab_check.checks.rds_sql_server_serverless.run_after == "rds_sql_server_classic" &&
+      output.lab_check.checks.rds_sql_server_classic.run_after == null
+    )
+    error_message = "The serverless check must run after the classic check so seeding never races."
+  }
+}
+
+run "lab_check_tests_brokers_over_tcp" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = false
+      kafka         = true
+    }
+    connectivity = {
+      kafka = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  assert {
+    condition     = output.lab_check.checks.kafka_classic.engine == "tcp" && !output.lab_check.checks.kafka_classic.seeded
+    error_message = "Brokers are checked for TCP reachability only."
+  }
+  assert {
+    condition     = length(output.lab_check.credentials) == 0
+    error_message = "TCP checks need no credentials."
+  }
+}
+
+run "lab_check_can_be_disabled" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    lab_check = {
+      enabled = false
+    }
+    features = {
+      workspace     = true
+      unity_catalog = false
+      rds_postgres  = true
+    }
+    connectivity = {
+      rds_postgres = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  assert {
+    condition     = output.lab_check == null
+    error_message = "lab_check.enabled = false must not create the job."
+  }
+}
+
+run "no_lab_check_without_a_path" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      unity_catalog = false
+      rds_postgres  = true
+    }
+  }
+  assert {
+    condition     = output.lab_check == null
+    error_message = "A disconnected source has nothing to check."
+  }
+}
+
+run "reject_unknown_endpoint_approval" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    endpoint_approval     = "sometimes"
+  }
+  expect_failures = [var.endpoint_approval]
+}
+
+run "foundation_without_workspace_resources_is_complete" {
+  command = plan
+  variables {
+    databricks_account_id       = "00000000-0000-0000-0000-000000000000"
+    workspace_resources_enabled = false
+    features = {
+      workspace     = true
+      unity_catalog = false
+    }
+  }
+  assert {
+    condition     = output.deployment_stage == "complete" && !output.workspace_resources_requested
+    error_message = "A workspace without workspace-level resources needs no second stage."
+  }
+}

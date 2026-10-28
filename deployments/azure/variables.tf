@@ -330,3 +330,32 @@ variable "allow_destructive_demo_cleanup" {
   type        = bool
   default     = false
 }
+variable "target" {
+  description = "Named account target from the local targets file (./infra targets). ./infra resolves it to the subscription, tenant, Databricks account, and default location; Terraform only records it."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.target == null || can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", var.target))
+    error_message = "target must be null or a target name such as \"field-sandbox\"."
+  }
+}
+variable "endpoint_approval" {
+  description = "How ./infra handles serverless NCC private endpoint connections after apply: auto approves the connections this deployment requested; manual leaves them for ./infra endpoints azure approve."
+  type        = string
+  default     = "auto"
+
+  validation {
+    condition     = contains(["auto", "manual"], var.endpoint_approval)
+    error_message = "endpoint_approval must be auto or manual."
+  }
+}
+variable "lab_check" {
+  description = "Sample data and connectivity checks run by ./infra verify."
+  type = object({
+    enabled           = optional(bool, true)
+    classic_node_type = optional(string)
+  })
+  default = {}
+}

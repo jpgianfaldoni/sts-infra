@@ -1,16 +1,20 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "clouds": {
     "aws": {
       "root": "deployments/aws",
       "auth_variables": [
         {
+          "name": "target",
+          "description": "Named account target from ./infra targets; supplies the account identifiers and default region so the tfvars file does not repeat them."
+        },
+        {
           "name": "databricks_account_id",
-          "description": "Required Databricks account UUID; preflight verifies every Databricks session targets it."
+          "description": "Databricks account UUID, from the tfvars or the target; preflight verifies every Databricks session targets it."
         },
         {
           "name": "aws_account_id",
-          "description": "Optional expected AWS account; pins the AWS provider's allowed_account_ids and preflight identity checks."
+          "description": "Expected AWS account; pins the AWS provider's allowed_account_ids and preflight identity checks. Required unless the target or ./infra setup supplies it."
         },
         {
           "name": "aws_profile",
@@ -27,10 +31,15 @@
         {
           "name": "deployment_id",
           "description": "Set by ./infra on every plan; drives derived resource names. Do not set it in tfvars."
+        },
+        {
+          "name": "workspace_resources_enabled",
+          "description": "Set by ./infra for the two-stage deployment of a new AWS workspace. Do not set it in tfvars."
         }
       ],
       "components": {
         "workspace": {
+          "summary": "Databricks workspace in a dedicated VPC with private classic-compute subnets, NAT, root S3 storage, and a cross-account IAM role; serverless compute is available in the same workspace",
           "module": "databricks-workspace",
           "feature": "features.workspace",
           "dependencies": [],
@@ -65,9 +74,13 @@
               "default": null,
               "description": "Workspace name; <prefix>-classic when null."
             }
-          }
+          },
+          "minutes": 15,
+          "cost": "medium",
+          "cost_note": "NAT gateway and VPC endpoints bill hourly; clusters bill only while running"
         },
         "unity_catalog": {
+          "summary": "Unity Catalog metastore (reused or created), storage credential, external location, and an initial catalog",
           "module": "unity-catalog",
           "feature": "features.unity_catalog",
           "dependencies": [
@@ -103,9 +116,12 @@
               ],
               "description": "create a dedicated metastore, assign existing_metastore_name, or auto-reuse the account metastore in the workspace region (creating one only if none exists)."
             }
-          }
+          },
+          "minutes": 3,
+          "cost": "low"
         },
         "glue_federation": {
+          "summary": "Private S3 sample data with an AWS Glue database and table, plus optional Unity Catalog federation objects",
           "module": "glue-federation",
           "feature": "features.glue_federation",
           "dependencies": [],
@@ -116,9 +132,12 @@
               "default": false,
               "description": "Also create the Unity Catalog credentials, external location, connection, and foreign catalog. Requires workspace and unity_catalog."
             }
-          }
+          },
+          "minutes": 5,
+          "cost": "low"
         },
         "rds_postgres": {
+          "summary": "Private Amazon RDS for PostgreSQL in its own VPC, with sample tables loaded by ./infra verify",
           "module": "rds-postgres",
           "feature": "features.rds_postgres",
           "connectivity": {
@@ -151,9 +170,13 @@
               "default": false,
               "description": "Enable PostgreSQL logical-replication parameters and create a write-only Secrets Manager credential for Lakeflow Connect source setup."
             }
-          }
+          },
+          "minutes": 15,
+          "cost": "low",
+          "cost_note": "db.t4g.micro"
         },
         "rds_sql_server": {
+          "summary": "Private Amazon RDS for SQL Server Standard in its own VPC, suitable for Lakeflow Connect CDC, with sample tables loaded by ./infra verify",
           "module": "rds-sql-server",
           "feature": "features.rds_sql_server",
           "connectivity": {
@@ -172,9 +195,13 @@
                 "private_link"
               ]
             }
-          }
+          },
+          "minutes": 35,
+          "cost": "high",
+          "cost_note": "SQL Server Standard license-included instance bills hourly"
         },
         "aurora_postgres": {
+          "summary": "Private Aurora PostgreSQL cluster with writer and reader endpoints in its own VPC",
           "module": "aurora-postgres",
           "feature": "features.aurora_postgres",
           "connectivity": {
@@ -193,16 +220,22 @@
                 "private_link"
               ]
             }
-          }
+          },
+          "minutes": 20,
+          "cost": "medium"
         },
         "aurora_proxy": {
+          "summary": "RDS Proxy in front of the Aurora PostgreSQL cluster",
           "module": "aurora-postgres",
           "feature": "features.aurora_proxy",
           "dependencies": [
             "aurora_postgres"
-          ]
+          ],
+          "minutes": 10,
+          "cost": "medium"
         },
         "rabbitmq": {
+          "summary": "Private self-managed RabbitMQ broker on EC2 in its own VPC",
           "module": "rabbitmq",
           "feature": "features.rabbitmq",
           "connectivity": {
@@ -229,9 +262,12 @@
               "default": false,
               "description": "Write the broker password only to Secrets Manager (write-only attribute) so it is never stored in Terraform state. For new deployments."
             }
-          }
+          },
+          "minutes": 5,
+          "cost": "low"
         },
         "kafka": {
+          "summary": "Private single-broker Kafka on EC2 with SASL credentials and a continuous synthetic event producer",
           "module": "kafka",
           "feature": "features.kafka",
           "connectivity": {
@@ -270,9 +306,12 @@
               "default": false,
               "description": "Write the broker password only to Secrets Manager (write-only attribute) so it is never stored in Terraform state. For new deployments."
             }
-          }
+          },
+          "minutes": 8,
+          "cost": "low"
         },
         "simulated_on_prem": {
+          "summary": "Isolated VPC with an HTTP test host that stands in for an on-premises network",
           "module": "simulated-on-prem",
           "feature": "features.simulated_on_prem",
           "connectivity": {
@@ -298,16 +337,23 @@
               "default": 8080,
               "description": "Port of the simulated on-premises HTTP test service."
             }
-          }
+          },
+          "minutes": 5,
+          "cost": "low"
         },
         "classic_private_link": {
+          "summary": "Interface VPC endpoint in the workspace VPC for each source that classic compute reaches over PrivateLink, with an internal NLB and endpoint service on the source side",
           "module": "classic-private-link",
           "feature": "derived.classic_private_link",
           "dependencies": [
             "workspace"
-          ]
+          ],
+          "minutes": 8,
+          "cost": "low",
+          "cost_note": "NLB and interface endpoints bill hourly"
         },
         "ncc": {
+          "summary": "Network Connectivity Configuration with a private endpoint rule per source that serverless compute reaches over PrivateLink",
           "module": "ncc",
           "feature": "derived.serverless_private_link",
           "dependencies": [
@@ -319,22 +365,73 @@
               "type": "string",
               "default": null,
               "description": "Reuse an existing NCC for serverless private endpoint rules instead of creating one."
+            },
+            "endpoint_approval": {
+              "path": "endpoint_approval",
+              "type": "string",
+              "default": "auto",
+              "allowed": [
+                "auto",
+                "manual"
+              ],
+              "description": "auto: ./infra approves the serverless endpoint connections this deployment requested right after apply; manual: leave them pending to practice the approval step with ./infra endpoints."
             }
-          }
+          },
+          "minutes": 10,
+          "cost": "low"
         },
         "transit_gateway": {
+          "summary": "Transit Gateway with attachments, routes, and security rules between the workspace VPC and the simulated on-premises VPC",
           "module": "transit-gateway",
           "feature": "derived.simulated_on_prem_transit_gateway",
           "dependencies": [
             "workspace",
             "simulated_on_prem"
-          ]
+          ],
+          "minutes": 10,
+          "cost": "medium",
+          "cost_note": "Transit Gateway attachments bill hourly"
+        },
+        "lab_check": {
+          "summary": "Databricks job that loads the sample data into each database and checks every configured classic and serverless path; run it with ./infra verify",
+          "module": "shared/lab-check",
+          "feature": "derived.lab_check",
+          "dependencies": [
+            "workspace"
+          ],
+          "options": {
+            "enabled": {
+              "path": "lab_check.enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Create the lab check job when at least one source has a classic or serverless path."
+            },
+            "classic_node_type": {
+              "path": "lab_check.classic_node_type",
+              "type": "string",
+              "default": null,
+              "description": "Node type for the single-node classic check cluster; the smallest general-purpose type with 4 cores when null."
+            }
+          },
+          "minutes": 2,
+          "cost": "low",
+          "cost_note": "Compute bills only while ./infra verify runs the job"
         }
+      },
+      "connectivity_modes": {
+        "none": "No network path: this compute type cannot reach the source (useful for networking exercises).",
+        "peering": "VPC peering between the workspace VPC and the source VPC, with routes and a security group rule for the source port.",
+        "private_link": "AWS PrivateLink: an internal NLB and endpoint service in front of the source. Classic compute uses an interface endpoint in the workspace VPC; serverless compute uses an NCC private endpoint rule.",
+        "transit_gateway": "AWS Transit Gateway between the workspace VPC and the simulated on-premises VPC."
       }
     },
     "azure": {
       "root": "deployments/azure",
       "auth_variables": [
+        {
+          "name": "target",
+          "description": "Named account target from ./infra targets; supplies the account identifiers and default region so the tfvars file does not repeat them."
+        },
         {
           "name": "subscription_id",
           "description": "Required Azure subscription; preflight verifies the Azure CLI session for it without changing the active subscription."
@@ -366,6 +463,7 @@
       ],
       "components": {
         "workspace": {
+          "summary": "Premium VNet-injected Azure Databricks workspace with secure cluster connectivity, NAT, and a private endpoint; serverless compute is available in the same workspace",
           "module": "databricks-workspace",
           "feature": "features.workspace",
           "dependencies": [],
@@ -401,9 +499,13 @@
               "default": null,
               "description": "Workspace name; derived from the prefix when null."
             }
-          }
+          },
+          "minutes": 15,
+          "cost": "medium",
+          "cost_note": "NAT gateway and private endpoints bill hourly; clusters bill only while running"
         },
         "test_vm": {
+          "summary": "Linux VM in the workspace VNet for private DNS and front-end Private Link tests (needs your public IP for SSH)",
           "module": "test-vm",
           "feature": "features.test_vm",
           "dependencies": [
@@ -428,9 +530,12 @@
               "default": null,
               "description": "OpenSSH public key; when set, password authentication is disabled."
             }
-          }
+          },
+          "minutes": 5,
+          "cost": "low"
         },
         "external_volume_storage": {
+          "summary": "ADLS Gen2 storage with an access connector, metastore assignment, and a Unity Catalog external volume",
           "module": "external-volume-storage",
           "feature": "features.external_volume_storage",
           "dependencies": [
@@ -478,16 +583,22 @@
               "default": false,
               "description": "Allow Unity Catalog force deletion for disposable environments."
             }
-          }
+          },
+          "minutes": 5,
+          "cost": "low"
         },
         "custom_dns": {
+          "summary": "DNS forwarder VM set as the workspace VNet's custom DNS server",
           "module": "custom-dns",
           "feature": "features.custom_dns",
           "dependencies": [
             "workspace"
-          ]
+          ],
+          "minutes": 5,
+          "cost": "low"
         },
         "sql_database": {
+          "summary": "Private Azure SQL logical server and database with a private endpoint and private DNS, with sample tables loaded by ./infra verify",
           "module": "sql-database",
           "feature": "features.sql_database",
           "dependencies": [],
@@ -525,14 +636,23 @@
               "default": true,
               "description": "Expose the Key Vault to the workspace as a Key Vault-backed secret scope (requires the workspace)."
             }
-          }
+          },
+          "minutes": 10,
+          "cost": "low",
+          "cost_note": "Basic tier",
+          "classic_path_option": "workspace_peering_enabled"
         },
         "sql_server_vm": {
+          "summary": "Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise",
           "module": "sql-server-vm",
           "feature": "features.sql_server_vm",
-          "dependencies": []
+          "dependencies": [],
+          "minutes": 20,
+          "cost": "high",
+          "cost_note": "SQL Server VM license bills hourly"
         },
         "ncc": {
+          "summary": "Network Connectivity Configuration with a private endpoint rule to each source serverless compute reaches over Private Link",
           "module": "ncc",
           "feature": "derived.serverless_private_link",
           "dependencies": [
@@ -544,22 +664,70 @@
               "type": "string",
               "default": null,
               "description": "Reuse an existing Databricks NCC for serverless private endpoint rules."
+            },
+            "endpoint_approval": {
+              "path": "endpoint_approval",
+              "type": "string",
+              "default": "auto",
+              "allowed": [
+                "auto",
+                "manual"
+              ],
+              "description": "auto: ./infra approves the serverless endpoint connections this deployment requested right after apply; manual: leave them pending to practice the approval step with ./infra endpoints."
             }
-          }
+          },
+          "minutes": 10,
+          "cost": "low"
         },
         "key_vault": {
+          "summary": "RBAC Azure Key Vault with the generated SQL credentials, exposed to the workspace as a Key Vault-backed secret scope",
           "module": "key-vault",
           "feature": "derived.key_vault",
-          "dependencies": []
+          "dependencies": [],
+          "minutes": 3,
+          "cost": "low"
         },
         "vnet_peering": {
+          "summary": "Peering between the workspace VNet and the SQL VNet, with the SQL private DNS zone linked to the workspace",
           "module": "vnet-peering",
           "feature": "derived.sql_workspace_peering",
           "dependencies": [
             "workspace",
             "sql_database"
-          ]
+          ],
+          "minutes": 3,
+          "cost": "low"
+        },
+        "lab_check": {
+          "summary": "Databricks job that loads the sample data into each database and checks every configured classic and serverless path; run it with ./infra verify",
+          "module": "shared/lab-check",
+          "feature": "derived.lab_check",
+          "dependencies": [
+            "workspace"
+          ],
+          "options": {
+            "enabled": {
+              "path": "lab_check.enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Create the lab check job when at least one source has a classic or serverless path."
+            },
+            "classic_node_type": {
+              "path": "lab_check.classic_node_type",
+              "type": "string",
+              "default": null,
+              "description": "Node type for the single-node classic check cluster; the smallest general-purpose type with 4 cores when null."
+            }
+          },
+          "minutes": 2,
+          "cost": "low",
+          "cost_note": "Compute bills only while ./infra verify runs the job"
         }
+      },
+      "connectivity_modes": {
+        "none": "No network path: this compute type cannot reach the source (useful for networking exercises).",
+        "peering": "VNet peering between the workspace VNet and the source VNet, with the source's private DNS zone linked to the workspace.",
+        "private_link": "Azure Private Link: an NCC private endpoint rule that Databricks provisions to the source for serverless compute."
       }
     }
   }

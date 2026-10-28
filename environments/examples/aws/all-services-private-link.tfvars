@@ -1,3 +1,4 @@
+# Scenario: Every AWS data source, reached from classic and serverless compute over PrivateLink
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 
 features = {

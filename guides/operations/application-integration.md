@@ -33,8 +33,10 @@ environment variables when no local profile overrides are set; see the
 [automation table](authentication.md#automation-and-applications). Use
 `./infra doctor <cloud> <tfvars> --json` as the "verify identity" step: it
 reports each identity and exits `0`, `10` (credentials missing or expired),
-`11` (wrong account or principal), or `12` (missing tool). Set `aws_account_id`
-in the tfvars so the AWS provider refuses to run in any other account.
+`11` (wrong account, principal, or target, or no pinned AWS account), or `12`
+(missing tool). Pin the AWS account with `aws_account_id` or a target; a worker
+that deliberately relies on ambient credentials must set
+`STS_INFRA_ALLOW_UNPINNED_ACCOUNT=1`.
 
 ## Application workflow
 
@@ -49,17 +51,23 @@ Display plan summary and collect approval
         ↓
 Apply the exact verified plan
         ↓
+Verify the network paths (./infra verify --json)
+        ↓
 Record status and non-sensitive outputs
 ```
 
-Use the same saved-plan and explicit-approval process for destroy. PrivateLink
-endpoint acceptance is another separately authorized external change.
+Use the same saved-plan and explicit-approval process for destroy. Serverless
+endpoint approval happens right after apply when `endpoint_approval = "auto"`;
+set `"manual"` to make it a separately authorized step.
 
-AWS workspace provisioning may require two jobs: account-level workspace
-infrastructure first, then workspace-scoped Unity Catalog resources after the
-workspace exists and its service principal assignment is ready. AWS destroy
-also needs workspace authentication to terminate clusters; `destroy-plan`
-verifies it before planning.
+With local OAuth profiles, a new AWS workspace deploys in two stages (see
+[first AWS workspace deployment](deployment.md#first-aws-workspace-deployment)).
+Automation that authenticates with environment credentials deploys in one
+stage, as long as its service principal can call the new workspace's APIs.
+AWS destroy also needs workspace authentication to terminate clusters;
+`destroy-plan` verifies it before planning. `./infra verify --json` and
+`./infra status --json` give a worker machine-readable results and the next
+step.
 
 ## Production boundary
 

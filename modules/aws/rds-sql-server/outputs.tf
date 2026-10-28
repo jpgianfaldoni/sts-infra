@@ -28,3 +28,7 @@ output "endpoint_service_name" {
 output "endpoint_service_id" {
   value = try(aws_vpc_endpoint_service.this[0].id, null)
 }
+output "seed_file" {
+  description = "Idempotent sample-data script that the lab check job runs; it creates the demo database first."
+  value       = "${path.module}/assets/seed.sql"
+}

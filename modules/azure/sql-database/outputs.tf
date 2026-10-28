@@ -39,3 +39,7 @@ output "private_dns_zone_name" {
 output "entra_admin_object_id" {
   value = try(var.entra_admin.object_id, null)
 }
+output "seed_file" {
+  description = "Idempotent sample-data script that the lab check job runs."
+  value       = "${path.module}/assets/seed.sql"
+}

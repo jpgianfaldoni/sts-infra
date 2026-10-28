@@ -60,6 +60,30 @@ case "${1:-} ${2:-}" in
     fi
     printf '{"Account":"%s","Arn":"arn:aws:sts::%s:assumed-role/Admin/tester"}\n' "$account" "$account"
     ;;
+  "secretsmanager get-secret-value")
+    echo '{"username":"lab_admin","password":"not-a-real-db-password"}'
+    ;;
+  "ec2 describe-vpc-endpoint-connections")
+    # Connections accepted or rejected earlier in the test report that state.
+    shopt -s nullglob
+    marks=("$TEST_STATE_DIR"/accepted-* "$TEST_STATE_DIR"/rejected-*)
+    decided="$(printf '%s\n' ${marks[@]+"${marks[@]}"} | sed -En 's#.*/(accepted|rejected)-(.*)$#\1 \2#p' |
+      jq -R 'split(" ") | {(.[1]): (if .[0] == "accepted" then "available" else "rejected" end)}' | jq -sc 'add // {}')"
+    jq -c --argjson decided "$decided" '.VpcEndpointConnections |= map(.VpcEndpointState = ($decided[.VpcEndpointId] // .VpcEndpointState))' \
+      <<< "${TEST_AWS_CONNECTIONS:-{\"VpcEndpointConnections\":[]\}}"
+    ;;
+  "ec2 reject-vpc-endpoint-connections")
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      [[ "${args[i]}" != "--vpc-endpoint-ids" ]] || touch "$TEST_STATE_DIR/rejected-${args[i + 1]}"
+    done
+    echo '{"Unsuccessful":[]}'
+    ;;
+  "ec2 accept-vpc-endpoint-connections")
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      [[ "${args[i]}" != "--vpc-endpoint-ids" ]] || touch "$TEST_STATE_DIR/accepted-${args[i + 1]}"
+    done
+    echo '{"Unsuccessful":[]}'
+    ;;
   *)
     echo "unexpected aws invocation: $*" >&2
     exit 1
@@ -125,6 +149,30 @@ case "${1:-} ${2:-}" in
       [[ -n "${TEST_DB_ENV_CREDENTIALS:-}" ]] || exit 1
     fi
     echo '{"userName":"tester@example.com"}'
+    ;;
+  "secrets put-secret")
+    cat > "$TEST_STATE_DIR/secret-$4"
+    ;;
+  "jobs run-now")
+    echo '{"run_id": 77}'
+    ;;
+  "jobs get-run")
+    result=SUCCESS
+    [[ -z "${TEST_VERIFY_FAIL:-}" ]] || result=FAILED
+    printf '{"run_id":77,"run_page_url":"https://dbc-lab.cloud.databricks.com/jobs/55/runs/77","state":{"life_cycle_state":"TERMINATED"},"tasks":[{"task_key":"rds_postgres_classic","run_id":78,"state":{"life_cycle_state":"TERMINATED","result_state":"%s"}}]}\n' "$result"
+    ;;
+  "jobs get-run-output")
+    if [[ -n "${TEST_VERIFY_FAIL:-}" ]]; then
+      echo '{"error":"RuntimeError: LAB CHECK FAILED at tcp: could not open a TCP connection to db.internal:5432 within 15s (timed out). Hint: Check the peering routes."}'
+    else
+      echo '{"notebook_output":{"result":"{\"status\":\"passed\",\"seeded\":true,\"rows\":{\"customers\":3,\"orders\":5}}"}}'
+    fi
+    ;;
+  "clusters list")
+    echo '[]'
+    ;;
+  "account network-connectivity")
+    echo '{"items":[{"rule_id":"rule-1","vpc_endpoint_id":"vpce-live","connection_state":"ESTABLISHED"}]}'
     ;;
   *)
     echo "unexpected databricks invocation: $*" >&2
@@ -409,7 +457,7 @@ reset_log
 run DATABRICKS_CONFIG_PROFILE=some-workspace AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY="$FAKE_AWS_SECRET" \
   "$INFRA" plan aws "$AWS_VARS"
 expect_code 0 "plan with ambient credentials"
-expect_log '^terraform -chdir=.* plan -var-file=.*aws-lab.tfvars -var=deployment_id=aws-lab -var=aws_profile=sts-aws-123456789012 -var=databricks_profile=sts-aws-account-00000000 -out='
+expect_log '^terraform -chdir=.* plan -var-file=.*aws-lab.tfvars -var=deployment_id=aws-lab -var=aws_profile=sts-aws-123456789012 -var=databricks_profile=sts-aws-account-00000000 -var=workspace_resources_enabled=false -out='
 # Version probes may see the shell environment; real operations must not.
 expect_no_log '^terraform-env .* for: -chdir='
 expect_no_log '^databricks-env '
@@ -420,7 +468,19 @@ ls "$ROOT/.artifacts/aws/aws-lab/logs/"*-plan.log >/dev/null 2>&1 || fail "plan 
 pass "profiles win over ambient credentials in Terraform and CLI calls"
 
 reset_log
-run AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY="$FAKE_AWS_SECRET" TEST_DB_ENV_CREDENTIALS=1 /bin/bash "$INFRA" plan aws "$AUTO_VARS"
+run AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY="$FAKE_AWS_SECRET" TEST_DB_ENV_CREDENTIALS=1 "$INFRA" doctor aws "$AUTO_VARS" --json
+expect_code 11 "doctor without a pinned AWS account"
+expect_json '.checks[1].status == "unpinned" and .checks[1].account_id == "210987654321" and
+  (.next_action.command | contains("aws_account_id = \"210987654321\""))' "unpinned AWS account not reported"
+reset_log
+run AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY="$FAKE_AWS_SECRET" TEST_DB_ENV_CREDENTIALS=1 "$INFRA" plan aws "$AUTO_VARS"
+expect_code 11 "plan without a pinned AWS account"
+expect_no_log '^terraform .* plan '
+pass "environments without a pinned AWS account stop before Terraform"
+
+reset_log
+run AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY="$FAKE_AWS_SECRET" TEST_DB_ENV_CREDENTIALS=1 STS_INFRA_ALLOW_UNPINNED_ACCOUNT=1 \
+  /bin/bash "$INFRA" plan aws "$AUTO_VARS"
 expect_code 0 "automation plan without profiles under /bin/bash"
 expect_log '^terraform -chdir=.* plan -var-file=.*aws-auto.tfvars -var=deployment_id=aws-auto -out='
 expect_log '^terraform-env AWS_ACCESS_KEY_ID set for: -chdir=.* plan '
@@ -442,11 +502,18 @@ expect_code 0 "plan with a mixed change set"
 expect_text "Saved plan summary: create=2 update=0 replace=1 delete=1" "plan counts"
 expect_text "  replace: aws_instance.broker" "replacement not listed"
 expect_text "  delete: aws_s3_bucket.old" "deletion not listed"
-expect_text "creates the Databricks workspace and workspace-level resources in the same apply" "same-apply warning missing"
-jq -e '.counts.replace == 1 and .delete == ["aws_s3_bucket.old"] and
-  .warnings == ["workspace_and_workspace_resources_in_one_apply"]' \
+expect_text "Deployment stage: foundation (1 of 2)" "foundation stage not reported"
+jq -e '.counts.replace == 1 and .delete == ["aws_s3_bucket.old"] and .stage == "foundation" and .warnings == []' \
   "$ROOT/.artifacts/aws/aws-second/apply.tfplan.summary.json" >/dev/null || fail "plan summary JSON is wrong"
-pass "plan summary lists destructive changes and warns about a single-stage workspace"
+grep -qx 'stage=foundation' "$ROOT/.artifacts/aws/aws-second/apply.tfplan.metadata" || fail "plan stage not recorded"
+pass "a new AWS workspace is planned as the foundation stage and destructive changes are listed"
+
+echo '{"resource_changes": [], "planned_values": {"outputs": {"workspace_resources_requested": {"value": false}}}}' > "$TEST_DIR/plan-nothing-deferred.json"
+run TEST_PLAN_JSON="$TEST_DIR/plan-nothing-deferred.json" "$INFRA" plan aws "$SECOND_VARS"
+expect_code 0 "plan without workspace-level resources"
+[[ "$OUT$ERR" != *"Deployment stage: foundation"* ]] || fail "a plan that defers nothing was reported as stage 1"
+grep -qx 'stage=complete' "$ROOT/.artifacts/aws/aws-second/apply.tfplan.metadata" || fail "a plan that defers nothing must be complete"
+pass "a new workspace without workspace-level resources deploys in one stage"
 
 # --- AWS: workspace authentication -----------------------------------------
 mkdir -p "$ROOT/.state/aws/aws-lab"
@@ -610,5 +677,125 @@ run STS_INFRA_AUTH_CONFIG="$TEST_DIR/bad-auth.json" "$INFRA" doctor aws "$AWS_VA
 expect_code 1 "invalid local mapping"
 expect_text "invalid local authentication config" "invalid mapping not rejected"
 pass "unexpected fields in the local mapping are rejected"
+
+# --- Named targets ------------------------------------------------------------
+export STS_INFRA_TARGETS="$TEST_DIR/config/targets.json"
+run "$INFRA" targets add lab-aws --cloud aws --aws-account-id 123456789012 --databricks-account-id "$ACCOUNT_ID" \
+  --region us-east-1 --description "Lab account"
+expect_code 0 "add an AWS target"
+run "$INFRA" targets add bad --cloud aws --aws-account-id 12345
+expect_code 2 "reject an invalid AWS account ID"
+run "$INFRA" targets --json
+expect_json '.targets["lab-aws"] == {cloud: "aws", aws_account_id: "123456789012", databricks_account_id: "'"$ACCOUNT_ID"'", region: "us-east-1", description: "Lab account"}' \
+  "target not saved"
+TARGET_VARS="$ROOT/environments/local/aws-target.tfvars"
+printf 'target = "lab-aws"\n\nfeatures = {\n  workspace = true\n}\n' > "$TARGET_VARS"
+run "$INFRA" doctor aws "$TARGET_VARS" --json
+expect_code 0 "doctor with a target"
+expect_json '.checks[1].id == "target" and .checks[1].status == "ok" and .checks[2].account_id == "123456789012" and .checks[2].source == "account mapping"' \
+  "target accounts not resolved"
+reset_log
+run "$INFRA" plan aws "$TARGET_VARS"
+expect_code 0 "plan with a target"
+expect_log "^terraform -chdir=.* plan -var-file=.*aws-target.tfvars -var=deployment_id=aws-target -var=aws_account_id=123456789012 -var=databricks_account_id=$ACCOUNT_ID -var=region=us-east-1 "
+expect_log '^aws sts get-caller-identity --output json --region us-east-1 '
+pass "a target supplies the account IDs and region"
+
+printf 'target = "missing"\n' > "$ROOT/environments/local/aws-missing-target.tfvars"
+run "$INFRA" doctor aws "$ROOT/environments/local/aws-missing-target.tfvars" --json
+expect_code 11 "doctor with an undefined target"
+expect_json '.checks[1].id == "target" and .checks[1].status == "mismatch"' "undefined target not reported"
+printf 'target = "lab-aws"\naws_account_id = "999999999999"\n' > "$ROOT/environments/local/aws-conflict.tfvars"
+run "$INFRA" doctor aws "$ROOT/environments/local/aws-conflict.tfvars" --json
+expect_code 11 "doctor with a conflicting target"
+expect_json '(.checks[1].detail | contains("aws_account_id (999999999999 in tfvars, 123456789012 in the target)"))' "conflict not explained"
+pass "undefined and conflicting targets exit 11"
+
+# --- Automatic endpoint approval ---------------------------------------------
+AWS_PENDING_OUTPUT='{"pending_endpoint_acceptances": {"sensitive": false, "value": [{"component": "rds_postgres", "kind": "serverless", "service_id": "vpce-svc-1", "endpoint_id": "vpce-db", "state": "pending"}]}}'
+AWS_CONNECTIONS='{"VpcEndpointConnections": [{"VpcEndpointId": "vpce-db", "VpcEndpointOwner": "565502421330", "VpcEndpointState": "pendingAcceptance"}, {"VpcEndpointId": "vpce-other", "VpcEndpointOwner": "565502421330", "VpcEndpointState": "pendingAcceptance"}]}'
+run "$INFRA" plan aws "$AWS_VARS"
+expect_code 0 "plan before an apply with serverless endpoints"
+reset_log
+run TEST_OUTPUT_JSON="$AWS_PENDING_OUTPUT" TEST_AWS_CONNECTIONS="$AWS_CONNECTIONS" STS_INFRA_WAIT_INTERVAL=0 "$INFRA" apply aws "$AWS_VARS"
+expect_code 0 "apply with automatic endpoint acceptance"
+expect_log '^aws ec2 accept-vpc-endpoint-connections --service-id vpce-svc-1 --vpc-endpoint-ids vpce-db '
+expect_no_log 'accept-vpc-endpoint-connections .*vpce-other'
+expect_text "Serverless endpoint connections accepted" "acceptance not confirmed"
+pass "apply accepts only the serverless connections this deployment requested"
+
+# State may not know the endpoint ID yet: it comes live from the NCC rule.
+LIVE_PENDING_OUTPUT='{"pending_endpoint_acceptances": {"sensitive": false, "value": [{"component": "rds_postgres", "kind": "serverless", "service_id": "vpce-svc-1", "endpoint_id": null, "state": "PENDING"}]},
+  "serverless_connectivity": {"sensitive": false, "value": {"network_connectivity_config_id": "ncc-1", "rules": {"rds_postgres": {"rule_id": "rule-1", "endpoint_id": null}}}}}'
+LIVE_CONNECTIONS='{"VpcEndpointConnections": [{"VpcEndpointId": "vpce-live", "VpcEndpointOwner": "565502421330", "VpcEndpointState": "pendingAcceptance"}, {"VpcEndpointId": "vpce-stranger", "VpcEndpointOwner": "565502421330", "VpcEndpointState": "pendingAcceptance"}]}'
+run "$INFRA" plan aws "$AWS_VARS"
+reset_log
+run TEST_OUTPUT_JSON="$LIVE_PENDING_OUTPUT" TEST_AWS_CONNECTIONS="$LIVE_CONNECTIONS" STS_INFRA_WAIT_INTERVAL=0 "$INFRA" apply aws "$AWS_VARS"
+expect_code 0 "apply with an endpoint ID known only to Databricks"
+expect_log '^databricks account network-connectivity list-private-endpoint-rules ncc-1 '
+expect_log '^aws ec2 accept-vpc-endpoint-connections --service-id vpce-svc-1 --vpc-endpoint-ids vpce-live '
+expect_no_log 'accept-vpc-endpoint-connections .*vpce-stranger'
+pass "connections from the shared Databricks role are accepted only when the rule names them"
+
+AZURE_MANUAL_VARS="$ROOT/environments/local/azure-manual.tfvars"
+printf 'subscription_id = "00000000-0000-0000-0000-000000000000"\ntenant_id = "11111111-1111-1111-1111-111111111111"\nendpoint_approval = "manual"\n' > "$AZURE_MANUAL_VARS"
+for vars in "$AZURE_VARS" "$AZURE_MANUAL_VARS"; do
+  run "$INFRA" plan azure "$vars"
+  expect_code 0 "Azure plan before apply"
+  reset_log
+  run TEST_OUTPUT_JSON="$PENDING_OUTPUT" "$INFRA" apply azure "$vars"
+  expect_code 0 "Azure apply"
+  if [[ "$vars" == "$AZURE_VARS" ]]; then
+    expect_log "^az network private-endpoint-connection approve --id $SQL_ID/privateEndpointConnections/conn-1 "
+  else
+    expect_no_log '^az network private-endpoint-connection approve'
+  fi
+done
+pass "Azure apply approves NCC endpoints unless endpoint_approval is manual"
+
+# --- Verify -------------------------------------------------------------------
+LAB_OUTPUT="$(jq -cn '{
+  workspace_url: {sensitive: false, value: "https://dbc-lab.cloud.databricks.com"},
+  serverless_connectivity: {sensitive: false, value: null},
+  lab_check: {sensitive: false, value: {
+    job_id: "55", job_url: "https://dbc-lab.cloud.databricks.com/jobs/55", secret_scope: "lab-scope",
+    credentials: [{source: "rds_postgres", secret_arn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds", username_key: "rds_postgres-username", password_key: "rds_postgres-password"}],
+    checks: {rds_postgres_classic: {source: "rds_postgres", compute: "classic", mode: "peering", engine: "postgresql", seeded: true}}}}}')"
+reset_log
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" STS_INFRA_VERIFY_INTERVAL=0 "$INFRA" verify aws "$AWS_VARS" --json
+expect_code 0 "verify with a passing check"
+expect_json '.status == "passed" and .checks[0].status == "passed" and .checks[0].rows.customers == 3 and .run_id == 77' "verify JSON is wrong"
+[[ "$(cat "$TEST_STATE_DIR/secret-rds_postgres-password")" == "not-a-real-db-password" ]] || fail "password was not copied through stdin"
+[[ "$(cat "$TEST_STATE_DIR/secret-rds_postgres-username")" == "lab_admin" ]] || fail "username was not copied"
+expect_log '^databricks secrets put-secret lab-scope rds_postgres-password --profile sts-aws-lab-workspace$'
+if grep -q 'not-a-real-db-password' "$CALL_LOG" || [[ "$OUT$ERR" == *not-a-real-db-password* ]]; then
+  fail "database password leaked into arguments or output"
+fi
+[[ -f "$ROOT/.artifacts/aws/aws-lab/verify.json" ]] || fail "verify result not saved"
+pass "verify copies credentials through pipes, runs the job, and reports each path"
+
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" TEST_VERIFY_FAIL=1 STS_INFRA_VERIFY_INTERVAL=0 "$INFRA" verify aws "$AWS_VARS"
+expect_code 13 "verify with a failing check"
+expect_text "[FAIL] rds_postgres from classic compute over peering: tcp: could not open a TCP connection" "failure not reported"
+expect_text "hint: Check the peering routes." "hint not reported"
+pass "failed checks exit 13 with the failing stage and a hint"
+
+DESTROY_OUTPUT='{"workspace_url": {"sensitive": false, "value": "https://dbc-lab.cloud.databricks.com"}, "connectivity": {"sensitive": false, "value": {"rds_postgres": {"classic": {"mode": "none"}, "serverless": {"mode": "private_link", "endpoint_service_id": "vpce-svc-1"}}}}}'
+DESTROY_CONNECTIONS='{"VpcEndpointConnections": [{"VpcEndpointId": "vpce-db", "VpcEndpointOwner": "565502421330", "VpcEndpointState": "available"}, {"VpcEndpointId": "vpce-classic", "VpcEndpointOwner": "123456789012", "VpcEndpointState": "available"}]}'
+run TEST_DB_WORKSPACES='[{"workspace_id": 42}]' "$INFRA" destroy-plan aws "$AWS_VARS"
+expect_code 0 "destroy-plan with a serverless endpoint"
+reset_log
+run TEST_DB_WORKSPACES='[{"workspace_id": 42}]' TEST_OUTPUT_JSON="$DESTROY_OUTPUT" TEST_AWS_CONNECTIONS="$DESTROY_CONNECTIONS" \
+  "$INFRA" destroy aws "$AWS_VARS" --confirm destroy-aws
+expect_code 0 "destroy with automatic endpoint rejection"
+expect_log '^aws ec2 reject-vpc-endpoint-connections --service-id vpce-svc-1 --vpc-endpoint-ids vpce-db '
+expect_no_log 'reject-vpc-endpoint-connections .*vpce-classic'
+expect_log '^terraform -chdir=.* apply .*destroy.tfplan$'
+pass "destroy rejects only the deployment's serverless connections before Terraform runs"
+
+run TEST_OUTPUT_JSON='{"deployment_stage": {"sensitive": false, "value": "foundation"}}' "$INFRA" verify aws "$AWS_VARS"
+expect_code 1 "verify during the foundation stage"
+expect_text "added by the second deployment stage" "foundation stage not explained"
+pass "verify explains that the lab check arrives with the second stage"
 
 echo "infra authentication tests passed"

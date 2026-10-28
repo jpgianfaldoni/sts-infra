@@ -1,3 +1,4 @@
+# Scenario: Classic compute reads a private PostgreSQL database with sample data over VPC peering
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 
 features = {
@@ -23,3 +24,7 @@ tags = {
 unity_catalog = {
   metastore_mode = "auto"
 }
+
+# Disposable lab: destroy may empty versioned buckets, lift database deletion
+# protection, and skip final snapshots. Set false to keep data on destroy.
+allow_destructive_demo_cleanup = true

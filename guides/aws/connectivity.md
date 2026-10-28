@@ -102,7 +102,9 @@ by the same Terraform configuration in the same AWS account, so Terraform
 accepts their connections automatically (`aws_vpc_endpoint_connection_accepter`
 in the `classic-private-link` module). Serverless NCC endpoints are
 cross-account and remain unusable until the expected Databricks-created
-endpoint is explicitly accepted. List the connections that still need a
+endpoint is accepted. With `endpoint_approval = "auto"` (the default),
+`./infra apply` accepts exactly the connections the deployment requested. With
+`endpoint_approval = "manual"`, list the connections that still need a
 decision with:
 
 ```bash
@@ -121,8 +123,10 @@ connection:
 
 Acceptance changes external state and is not performed by validation or planning.
 
-Before destroying an endpoint service, reject its managed endpoint connection;
-AWS will not delete a service while an active consumer endpoint remains:
+AWS will not delete an endpoint service while an active consumer endpoint
+remains. With `endpoint_approval = "auto"`, the confirmed `./infra destroy`
+rejects the serverless connections on the deployment's endpoint services
+before Terraform runs. Otherwise reject them yourself first:
 
 ```bash
 ./infra endpoints aws reject environments/local/my-aws.tfvars \

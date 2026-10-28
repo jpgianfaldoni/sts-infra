@@ -8,6 +8,10 @@ other state-changing command run the same checks automatically.
 ## Quick start
 
 ```bash
+./infra targets add field-aws --cloud aws --aws-account-id 123456789012 \
+  --databricks-account-id <uuid> --region us-west-2 \
+  --sso-start-url https://my-org.awsapps.com/start --sso-region us-east-1 \
+  --sso-role-name AdministratorAccess                     # once per account
 ./infra doctor aws environments/local/my-aws.tfvars       # what is missing?
 ./infra setup aws environments/local/my-aws.tfvars --yes  # fix it (opens a browser)
 ```
@@ -24,6 +28,7 @@ default. Running setup again is a no-op when every session is valid.
 | Check | AWS | Azure |
 | --- | --- | --- |
 | `tools` | Terraform 1.11+, AWS CLI v2, Databricks CLI, jq | Terraform 1.11+, Azure CLI, Databricks CLI, jq, curl |
+| `target` | only when the tfvars sets `target`: the target exists, is an AWS target, and agrees with any IDs the tfvars also sets | same, for an Azure target |
 | cloud | `aws sts get-caller-identity` for the selected profile, compared with the expected account | `az account show` plus a token request for the subscription, compared with the expected tenant |
 | `databricks_account` | an account-API call with the account profile | an account-API call with the Azure CLI identity or a mapped profile |
 | `databricks_workspace` | once the workspace exists: the workspace OAuth profile (checked against this deployment's workspace URL) | only when a workspace profile is configured; otherwise the Azure CLI identity is used |
@@ -51,7 +56,7 @@ a browser login finishes:
 | --- | --- |
 | 0 | ready |
 | 10 | a browser login is required; run `next_action.command` |
-| 11 | the identity, account, tenant, or profile does not match the environment |
+| 11 | the identity, account, tenant, profile, or target does not match the environment, or no AWS account is pinned (status `unpinned`) |
 | 12 | a required tool is missing or too old |
 
 Every authentication failure in `plan`, `apply`, `destroy-plan`, and the other
@@ -103,9 +108,42 @@ the CLI cannot refresh on its own (it reads only the expiry fields of the SSO
 cache entry, never tokens). Plans warn below 15 minutes and applies or destroys
 below 60 minutes. Renew early with `./infra setup aws <tfvars> --yes --force-login`.
 
-Set `aws_account_id` in the tfvars to pin the account: the Terraform provider
-then refuses to operate anywhere else (`allowed_account_ids`), and setup can
-find or create the right profile without asking.
+Every AWS environment must pin its account, through a target or
+`aws_account_id` in the tfvars (or the account that setup recorded for the
+environment). Otherwise `doctor` and `plan` exit 11 with status `unpinned` and
+name the account the current credentials belong to. A pinned account also
+makes the Terraform provider refuse to operate anywhere else
+(`allowed_account_ids`), and lets setup find or create the right profile
+without asking. Automation that deliberately relies on ambient credentials can
+set `STS_INFRA_ALLOW_UNPINNED_ACCOUNT=1`.
+
+## Targets
+
+A target names an account so that environment files say `target = "<name>"`
+instead of repeating identifiers. Targets hold only non-secret values and live
+in `~/.config/sts-infra/targets.json`, next to the local mapping (override the
+path with `STS_INFRA_TARGETS`, for example to share a team file kept outside
+this repository):
+
+```bash
+./infra targets
+./infra targets --json
+./infra targets add field-aws --cloud aws --aws-account-id 123456789012 \
+  --databricks-account-id <uuid> --region us-west-2 \
+  [--sso-start-url <url> --sso-region <region> --sso-role-name <role>] \
+  [--aws-profile <name>] [--databricks-profile <name>] [--description <text>]
+./infra targets add field-azure --cloud azure --subscription-id <uuid> \
+  [--tenant-id <uuid>] [--databricks-account-id <uuid>] [--location <location>]
+./infra targets remove field-aws
+```
+
+Values in the tfvars win over the target, but a different value for the same
+identifier is reported as a `target` mismatch. Identifiers the tfvars leaves
+out are passed to Terraform as `-var` arguments (AWS `aws_account_id`,
+`databricks_account_id`, and `region`; Azure `databricks_account_id` and
+`location`, with the subscription and tenant always passed). Setup uses the
+target's SSO settings to create a missing AWS profile, and its profile names,
+when present, ahead of the account mapping.
 
 ## Azure
 

@@ -220,7 +220,7 @@ def paths_of(variables, name, prefix):
     return found
 
 
-assert manifest["schema_version"] == 3, "components.json schema_version must be 3"
+assert manifest["schema_version"] == 4, "components.json schema_version must be 4"
 for cloud, config in manifest["clouds"].items():
     deployment = root / config["root"]
     assert deployment.is_dir(), f"missing {cloud} root"
@@ -232,9 +232,16 @@ for cloud, config in manifest["clouds"].items():
     manifest_connectivity = {}
     for name, component in config["components"].items():
         label = f"{cloud}.{name}"
-        module = root / "modules" / cloud / component["module"]
+        # Modules shared by both clouds live under modules/shared.
+        module_name = component["module"]
+        module = root / "modules" / (module_name if module_name.startswith("shared/") else f"{cloud}/{module_name}")
         if not module.is_dir():
             errors.append(f"{label}: missing module {module.relative_to(root)}")
+        for field in ("summary", "minutes", "cost"):
+            if field not in component:
+                errors.append(f"{label}: missing {field}")
+        if component.get("cost") not in (None, "low", "medium", "high"):
+            errors.append(f"{label}: cost must be low, medium, or high")
         feature = component.get("feature")
         if not feature:
             errors.append(f"{label}: missing feature")

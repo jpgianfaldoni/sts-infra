@@ -114,3 +114,16 @@ output "pending_endpoint_approvals" {
     if coalesce(rule.connection_state, "UNKNOWN") != "ESTABLISHED"
   ]
 }
+
+output "lab_check" {
+  description = "Sample data and network path checks. ./infra verify runs the job and reports each path; credentials come from the Key Vault-backed secret scope."
+  # A conditional rather than try(): try() hides the known check keys behind
+  # the job ID, which is unknown until apply.
+  value = local.lab_check_enabled ? {
+    job_id       = module.lab_check[0].job_id
+    job_url      = module.lab_check[0].job_url
+    secret_scope = local.lab_check_sql_scope
+    credentials  = []
+    checks       = module.lab_check[0].checks
+  } : null
+}
