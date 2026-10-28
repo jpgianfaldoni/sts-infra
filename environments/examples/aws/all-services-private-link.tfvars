@@ -1,6 +1,4 @@
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
-name_prefix           = "acme-lab"
-workspace_name        = "acme-lab-classic"
 
 features = {
   workspace       = true
@@ -36,5 +34,18 @@ connectivity = {
   }
 }
 
+# Broker passwords are written only to Secrets Manager and never stored in state.
+kafka = {
+  ephemeral_credentials = true
+}
+rabbitmq = {
+  ephemeral_credentials = true
+}
+
 # Disposable environments only. This enables force-delete and skips final snapshots.
 allow_destructive_demo_cleanup = true
+
+# Reuse the account's metastore in the region when one exists; otherwise create one.
+unity_catalog = {
+  metastore_mode = "auto"
+}

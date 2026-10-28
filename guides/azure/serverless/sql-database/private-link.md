@@ -1,6 +1,57 @@
-# UI guide: connect Azure Databricks serverless to private SQL Server resources
+# Connect Azure Databricks serverless to private SQL Server resources
 
-This guide explains the networking components and the UI steps required to
+## Automated path for Azure SQL Database
+
+For Azure SQL Database, Terraform creates the serverless networking objects:
+
+```hcl
+databricks_account_id = "<azure-databricks-account-id>"
+
+features = {
+  workspace    = true
+  sql_database = true
+}
+
+connectivity = {
+  sql_database = {
+    serverless = "private_link"
+  }
+}
+```
+
+The plan creates a Network Connectivity Configuration (NCC) in the workspace
+region, binds it to the workspace, and adds a private endpoint rule for the
+SQL logical server (`group_id = "sqlServer"`). Set
+`existing_network_connectivity_config_id` to add the rule to an NCC that
+already serves the workspace. Start from
+`environments/examples/azure/workspace-sql-serverless-private-link.tfvars`.
+
+Databricks then creates a managed private endpoint that stays **Pending** until
+the SQL server owner approves it. Approval is an explicit step, like AWS
+endpoint acceptance:
+
+```bash
+./infra apply azure environments/local/my-sql.tfvars
+./infra endpoints azure status environments/local/my-sql.tfvars
+# Review component, resource_id, and endpoint_name, then:
+./infra endpoints azure approve environments/local/my-sql.tfvars \
+  --resource-id <resource_id> --endpoint-name <endpoint_name>
+```
+
+`status` lists `pending_endpoint_approvals`. After approval, the rule reports
+`ESTABLISHED` on the next plan or refresh, and serverless compute can reach
+`<server>.database.windows.net:1433`. Create the Unity Catalog connection as
+described in [Configure the SQL connection](#8-configure-the-sql-connection);
+the SQL credentials are in the Key Vault and the Key Vault-backed secret scope
+described in the [deployment notes](overview.md).
+
+The rest of this guide explains the components and the equivalent manual
+steps. Use it to understand the design, to configure SQL Server on a VM (which
+Terraform does not automate), or to troubleshoot.
+
+## Manual UI guide
+
+This section explains the networking components and the UI steps required to
 connect Azure Databricks serverless compute to SQL Server in Azure without
 enabling public database access. Configuration is performed through the Azure
 portal, the Azure Databricks account console, and the Databricks workspace UI.

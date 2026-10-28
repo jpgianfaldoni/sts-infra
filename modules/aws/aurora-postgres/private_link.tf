@@ -23,7 +23,7 @@ resource "aws_vpc_security_group_ingress_rule" "database_from_nlb" {
 }
 resource "aws_lb" "this" {
   count                                                        = local.enable_private_link ? 1 : 0
-  name                                                         = substr("${local.name}-pl", 0, 32)
+  name                                                         = trimsuffix(substr("${local.name}-pl", 0, 32), "-")
   internal                                                     = true
   load_balancer_type                                           = "network"
   subnets                                                      = module.network.subnet_ids
@@ -34,7 +34,7 @@ resource "aws_lb" "this" {
 }
 resource "aws_lb_target_group" "readers" {
   count              = local.enable_private_link ? 1 : 0
-  name               = substr("${local.name}-reader", 0, 32)
+  name               = trimsuffix(substr("${local.name}-reader", 0, 32), "-")
   port               = local.port
   protocol           = "TCP"
   target_type        = "ip"

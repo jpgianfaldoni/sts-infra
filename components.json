@@ -1,31 +1,565 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "clouds": {
     "aws": {
       "root": "deployments/aws",
+      "auth_variables": [
+        {
+          "name": "databricks_account_id",
+          "description": "Required Databricks account UUID; preflight verifies every Databricks session targets it."
+        },
+        {
+          "name": "aws_account_id",
+          "description": "Optional expected AWS account; pins the AWS provider's allowed_account_ids and preflight identity checks."
+        },
+        {
+          "name": "aws_profile",
+          "description": "Legacy fallback AWS CLI profile. Prefer ./infra setup, which records the profile outside Git."
+        },
+        {
+          "name": "databricks_profile",
+          "description": "Legacy fallback Databricks account profile. Prefer ./infra setup."
+        },
+        {
+          "name": "databricks_workspace_profile",
+          "description": "Legacy fallback Databricks workspace profile. Prefer ./infra setup after the workspace exists."
+        },
+        {
+          "name": "deployment_id",
+          "description": "Set by ./infra on every plan; drives derived resource names. Do not set it in tfvars."
+        }
+      ],
       "components": {
-        "workspace": { "module": "databricks-workspace", "feature": "features.workspace", "dependencies": [] },
-        "unity_catalog": { "module": "unity-catalog", "feature": "features.unity_catalog", "dependencies": ["workspace"] },
-        "glue_federation": { "module": "glue-federation", "feature": "features.glue_federation", "dependencies": [] },
-        "rds_postgres": { "module": "rds-postgres", "feature": "features.rds_postgres", "connectivity": { "classic": { "path": "connectivity.rds_postgres.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.rds_postgres.serverless", "modes": ["none", "private_link"] } } },
-        "rds_sql_server": { "module": "rds-sql-server", "feature": "features.rds_sql_server", "connectivity": { "classic": { "path": "connectivity.rds_sql_server.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.rds_sql_server.serverless", "modes": ["none", "private_link"] } } },
-        "aurora_postgres": { "module": "aurora-postgres", "feature": "features.aurora_postgres", "connectivity": { "classic": { "path": "connectivity.aurora_postgres.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.aurora_postgres.serverless", "modes": ["none", "private_link"] } } },
-        "aurora_proxy": { "module": "aurora-postgres", "feature": "features.aurora_proxy", "dependencies": ["aurora_postgres"] },
-        "rabbitmq": { "module": "rabbitmq", "feature": "features.rabbitmq", "connectivity": { "classic": { "path": "connectivity.rabbitmq.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.rabbitmq.serverless", "modes": ["none", "private_link"] } } },
-        "kafka": { "module": "kafka", "feature": "features.kafka", "connectivity": { "classic": { "path": "connectivity.kafka.classic", "modes": ["none", "peering", "private_link"] }, "serverless": { "path": "connectivity.kafka.serverless", "modes": ["none", "private_link"] } } },
-        "simulated_on_prem": { "module": "simulated-on-prem", "feature": "features.simulated_on_prem", "connectivity": { "classic": { "path": "connectivity.simulated_on_prem.classic", "modes": ["none", "transit_gateway"] }, "serverless": { "path": "connectivity.simulated_on_prem.serverless", "modes": ["none", "private_link"] } } },
-        "classic_private_link": { "module": "classic-private-link", "feature": "derived.classic_private_link", "dependencies": ["workspace"] },
-        "ncc": { "module": "ncc", "feature": "derived.serverless_private_link", "dependencies": ["workspace"] },
-        "transit_gateway": { "module": "transit-gateway", "feature": "derived.simulated_on_prem_transit_gateway", "dependencies": ["workspace", "simulated_on_prem"] }
+        "workspace": {
+          "module": "databricks-workspace",
+          "feature": "features.workspace",
+          "dependencies": [],
+          "options": {
+            "backend_private_link": {
+              "path": "workspace_backend_private_link.enabled",
+              "type": "bool",
+              "default": false,
+              "description": "Route classic compute-to-control-plane traffic through back-end PrivateLink."
+            },
+            "backend_private_link_subnets": {
+              "path": "workspace_backend_private_link.endpoint_subnet_cidrs",
+              "type": "list(string)",
+              "default": [],
+              "description": "Exactly two IPv4 endpoint subnet CIDRs, required when back-end PrivateLink is enabled."
+            },
+            "public_access_enabled": {
+              "path": "workspace_backend_private_link.public_access_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Keep public workspace UI/API access. Operators and ./infra need it unless they run inside the private network."
+            },
+            "name_prefix": {
+              "path": "name_prefix",
+              "type": "string",
+              "default": null,
+              "description": "Resource name prefix; derived from the deployment ID when null."
+            },
+            "workspace_name": {
+              "path": "workspace_name",
+              "type": "string",
+              "default": null,
+              "description": "Workspace name; <prefix>-classic when null."
+            }
+          }
+        },
+        "unity_catalog": {
+          "module": "unity-catalog",
+          "feature": "features.unity_catalog",
+          "dependencies": [
+            "workspace"
+          ],
+          "options": {
+            "existing_metastore_name": {
+              "path": "unity_catalog.existing_metastore_name",
+              "type": "string",
+              "default": null,
+              "description": "Reuse an existing regional metastore instead of creating one. Most shared accounts already have one per region."
+            },
+            "create_initial_catalog": {
+              "path": "unity_catalog.create_initial_catalog",
+              "type": "bool",
+              "default": true,
+              "description": "Create the storage credential, external location, and initial catalog."
+            },
+            "initial_catalog_name": {
+              "path": "initial_catalog_name",
+              "type": "string",
+              "default": "main",
+              "description": "Name of the initial catalog."
+            },
+            "metastore_mode": {
+              "path": "unity_catalog.metastore_mode",
+              "type": "string",
+              "default": "create",
+              "allowed": [
+                "create",
+                "existing",
+                "auto"
+              ],
+              "description": "create a dedicated metastore, assign existing_metastore_name, or auto-reuse the account metastore in the workspace region (creating one only if none exists)."
+            }
+          }
+        },
+        "glue_federation": {
+          "module": "glue-federation",
+          "feature": "features.glue_federation",
+          "dependencies": [],
+          "options": {
+            "databricks_connectivity_enabled": {
+              "path": "glue_federation.databricks_connectivity_enabled",
+              "type": "bool",
+              "default": false,
+              "description": "Also create the Unity Catalog credentials, external location, connection, and foreign catalog. Requires workspace and unity_catalog."
+            }
+          }
+        },
+        "rds_postgres": {
+          "module": "rds-postgres",
+          "feature": "features.rds_postgres",
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.rds_postgres.classic",
+              "modes": [
+                "none",
+                "peering",
+                "private_link"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.rds_postgres.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "engine_version": {
+              "path": "rds_postgres.engine_version",
+              "type": "string",
+              "default": null,
+              "description": "Optional PostgreSQL engine version. Required when Lakeflow Connect source setup is enabled so the matching parameter-group family is deterministic."
+            },
+            "lakeflow_connect_enabled": {
+              "path": "rds_postgres.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": false,
+              "description": "Enable PostgreSQL logical-replication parameters and create a write-only Secrets Manager credential for Lakeflow Connect source setup."
+            }
+          }
+        },
+        "rds_sql_server": {
+          "module": "rds-sql-server",
+          "feature": "features.rds_sql_server",
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.rds_sql_server.classic",
+              "modes": [
+                "none",
+                "peering",
+                "private_link"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.rds_sql_server.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          }
+        },
+        "aurora_postgres": {
+          "module": "aurora-postgres",
+          "feature": "features.aurora_postgres",
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.aurora_postgres.classic",
+              "modes": [
+                "none",
+                "peering",
+                "private_link"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.aurora_postgres.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          }
+        },
+        "aurora_proxy": {
+          "module": "aurora-postgres",
+          "feature": "features.aurora_proxy",
+          "dependencies": [
+            "aurora_postgres"
+          ]
+        },
+        "rabbitmq": {
+          "module": "rabbitmq",
+          "feature": "features.rabbitmq",
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.rabbitmq.classic",
+              "modes": [
+                "none",
+                "peering",
+                "private_link"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.rabbitmq.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "ephemeral_credentials": {
+              "path": "rabbitmq.ephemeral_credentials",
+              "type": "bool",
+              "default": false,
+              "description": "Write the broker password only to Secrets Manager (write-only attribute) so it is never stored in Terraform state. For new deployments."
+            }
+          }
+        },
+        "kafka": {
+          "module": "kafka",
+          "feature": "features.kafka",
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.kafka.classic",
+              "modes": [
+                "none",
+                "peering",
+                "private_link"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.kafka.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "topic_name": {
+              "path": "kafka.topic_name",
+              "type": "string",
+              "default": "demo-events",
+              "description": "Topic written by the synthetic producer."
+            },
+            "producer_interval_seconds": {
+              "path": "kafka.producer_interval_seconds",
+              "type": "number",
+              "default": 1,
+              "description": "Seconds between synthetic events (1-3600)."
+            },
+            "ephemeral_credentials": {
+              "path": "kafka.ephemeral_credentials",
+              "type": "bool",
+              "default": false,
+              "description": "Write the broker password only to Secrets Manager (write-only attribute) so it is never stored in Terraform state. For new deployments."
+            }
+          }
+        },
+        "simulated_on_prem": {
+          "module": "simulated-on-prem",
+          "feature": "features.simulated_on_prem",
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.simulated_on_prem.classic",
+              "modes": [
+                "none",
+                "transit_gateway"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.simulated_on_prem.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "service_port": {
+              "path": "simulated_on_prem.service_port",
+              "type": "number",
+              "default": 8080,
+              "description": "Port of the simulated on-premises HTTP test service."
+            }
+          }
+        },
+        "classic_private_link": {
+          "module": "classic-private-link",
+          "feature": "derived.classic_private_link",
+          "dependencies": [
+            "workspace"
+          ]
+        },
+        "ncc": {
+          "module": "ncc",
+          "feature": "derived.serverless_private_link",
+          "dependencies": [
+            "workspace"
+          ],
+          "options": {
+            "existing_network_connectivity_config_id": {
+              "path": "existing_network_connectivity_config_id",
+              "type": "string",
+              "default": null,
+              "description": "Reuse an existing NCC for serverless private endpoint rules instead of creating one."
+            }
+          }
+        },
+        "transit_gateway": {
+          "module": "transit-gateway",
+          "feature": "derived.simulated_on_prem_transit_gateway",
+          "dependencies": [
+            "workspace",
+            "simulated_on_prem"
+          ]
+        }
       }
     },
     "azure": {
       "root": "deployments/azure",
+      "auth_variables": [
+        {
+          "name": "subscription_id",
+          "description": "Required Azure subscription; preflight verifies the Azure CLI session for it without changing the active subscription."
+        },
+        {
+          "name": "tenant_id",
+          "description": "Optional Entra tenant. ./infra supplies the tenant of the selected subscription so every provider uses it."
+        },
+        {
+          "name": "databricks_account_id",
+          "description": "Azure Databricks account UUID, required for account-level Unity Catalog resources."
+        },
+        {
+          "name": "databricks_auth_type",
+          "description": "Databricks auth type for providers without a profile. ./infra sets azure-cli for local sessions; automation leaves it null."
+        },
+        {
+          "name": "databricks_account_profile",
+          "description": "Optional Databricks account OAuth profile. Without it, the Azure CLI identity is used."
+        },
+        {
+          "name": "databricks_workspace_profile",
+          "description": "Optional Databricks workspace profile. Without it, the Azure CLI identity is used."
+        },
+        {
+          "name": "deployment_id",
+          "description": "Set by ./infra on every plan; drives derived resource names. Do not set it in tfvars."
+        }
+      ],
       "components": {
-        "workspace": { "module": "databricks-workspace", "feature": "features.workspace", "dependencies": [] },
-        "custom_dns": { "module": "custom-dns", "feature": "features.custom_dns", "dependencies": ["workspace"] },
-        "sql_database": { "module": "sql-database", "feature": "features.sql_database", "dependencies": [] },
-        "sql_server_vm": { "module": "sql-server-vm", "feature": "features.sql_server_vm", "dependencies": [] }
+        "workspace": {
+          "module": "databricks-workspace",
+          "feature": "features.workspace",
+          "dependencies": [],
+          "options": {
+            "front_end_private_link": {
+              "path": "workspace_front_end_private_link.enabled",
+              "type": "bool",
+              "default": null,
+              "deprecated": true,
+              "description": "Deprecated alias for browser_authentication; used only when browser_authentication is unset. Removed in the next release."
+            },
+            "browser_authentication": {
+              "path": "workspace_front_end_private_link.browser_authentication_enabled",
+              "type": "bool",
+              "default": null,
+              "description": "Create the browser_authentication (browser SSO) private endpoint. The databricks_ui_api endpoint always exists."
+            },
+            "public_network_access_enabled": {
+              "path": "workspace_front_end_private_link.public_network_access_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Keep public workspace access. Disabling it requires front-end Private Link and running operators inside the private network."
+            },
+            "name_prefix": {
+              "path": "name_prefix",
+              "type": "string",
+              "default": null,
+              "description": "Resource name prefix; derived from the deployment ID when null."
+            },
+            "workspace_name": {
+              "path": "workspace_name",
+              "type": "string",
+              "default": null,
+              "description": "Workspace name; derived from the prefix when null."
+            }
+          }
+        },
+        "test_vm": {
+          "module": "test-vm",
+          "feature": "features.test_vm",
+          "dependencies": [
+            "workspace"
+          ],
+          "options": {
+            "allowed_ssh_source_cidr": {
+              "path": "test_vm.allowed_ssh_source_cidr",
+              "type": "string",
+              "default": null,
+              "description": "Required CIDR allowed to reach the test VM over SSH."
+            },
+            "vm_size": {
+              "path": "test_vm.vm_size",
+              "type": "string",
+              "default": "Standard_B2s",
+              "description": "Test VM size."
+            },
+            "admin_ssh_public_key": {
+              "path": "test_vm.admin_ssh_public_key",
+              "type": "string",
+              "default": null,
+              "description": "OpenSSH public key; when set, password authentication is disabled."
+            }
+          }
+        },
+        "external_volume_storage": {
+          "module": "external-volume-storage",
+          "feature": "features.external_volume_storage",
+          "dependencies": [
+            "workspace"
+          ],
+          "options": {
+            "public_network_access_enabled": {
+              "path": "external_volume_storage.public_network_access_enabled",
+              "type": "bool",
+              "default": false,
+              "description": "Expose the storage account's public endpoint (protected by RBAC)."
+            },
+            "allow_unreachable_storage": {
+              "path": "external_volume_storage.allow_unreachable_storage",
+              "type": "bool",
+              "default": false,
+              "description": "Acknowledge a metadata-only deployment when storage has no public or private compute path."
+            },
+            "metastore_mode": {
+              "path": "external_volume_storage.metastore_mode",
+              "type": "string",
+              "default": "create",
+              "allowed": [
+                "create",
+                "existing",
+                "auto"
+              ],
+              "description": "create a dedicated metastore, reuse metastore_id (existing), or auto: keep the managed one, reuse the only regional metastore, or create one; fails when several regional metastores exist."
+            },
+            "metastore_id": {
+              "path": "external_volume_storage.metastore_id",
+              "type": "string",
+              "default": null,
+              "description": "Existing metastore ID, required when metastore_mode is existing."
+            },
+            "volume_storage_path": {
+              "path": "external_volume_storage.volume_storage_path",
+              "type": "string",
+              "default": "volume",
+              "description": "Storage prefix backing the external volume; ./infra seed uploads here."
+            },
+            "allow_force_destroy": {
+              "path": "external_volume_storage.allow_force_destroy",
+              "type": "bool",
+              "default": false,
+              "description": "Allow Unity Catalog force deletion for disposable environments."
+            }
+          }
+        },
+        "custom_dns": {
+          "module": "custom-dns",
+          "feature": "features.custom_dns",
+          "dependencies": [
+            "workspace"
+          ]
+        },
+        "sql_database": {
+          "module": "sql-database",
+          "feature": "features.sql_database",
+          "dependencies": [],
+          "connectivity": {
+            "serverless": {
+              "path": "connectivity.sql_database.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "workspace_peering_enabled": {
+              "path": "sql_database.workspace_peering_enabled",
+              "type": "bool",
+              "default": false,
+              "description": "Peer the SQL VNet with the workspace VNet and link its private DNS zone for classic compute and the test VM."
+            },
+            "entra_admin_enabled": {
+              "path": "sql_database.entra_admin_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Make the deploying principal the SQL server Microsoft Entra administrator; SQL authentication stays enabled."
+            },
+            "key_vault_enabled": {
+              "path": "key_vault.enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Store generated SQL passwords in an RBAC Azure Key Vault."
+            },
+            "databricks_secret_scope_enabled": {
+              "path": "key_vault.databricks_secret_scope_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Expose the Key Vault to the workspace as a Key Vault-backed secret scope (requires the workspace)."
+            }
+          }
+        },
+        "sql_server_vm": {
+          "module": "sql-server-vm",
+          "feature": "features.sql_server_vm",
+          "dependencies": []
+        },
+        "ncc": {
+          "module": "ncc",
+          "feature": "derived.serverless_private_link",
+          "dependencies": [
+            "workspace"
+          ],
+          "options": {
+            "existing_network_connectivity_config_id": {
+              "path": "existing_network_connectivity_config_id",
+              "type": "string",
+              "default": null,
+              "description": "Reuse an existing Databricks NCC for serverless private endpoint rules."
+            }
+          }
+        },
+        "key_vault": {
+          "module": "key-vault",
+          "feature": "derived.key_vault",
+          "dependencies": []
+        },
+        "vnet_peering": {
+          "module": "vnet-peering",
+          "feature": "derived.sql_workspace_peering",
+          "dependencies": [
+            "workspace",
+            "sql_database"
+          ]
+        }
       }
     }
   }

@@ -36,3 +36,14 @@ resource "aws_vpc_security_group_egress_rule" "control_plane" {
   ip_protocol       = "tcp"
   description       = "Databricks ${each.key} egress"
 }
+
+resource "aws_vpc_security_group_egress_rule" "private_link_scc_relay" {
+  count = var.backend_private_link.enabled ? 1 : 0
+
+  security_group_id = aws_security_group.workspace.id
+  cidr_ipv4         = var.vpc_cidr
+  from_port         = 6666
+  to_port           = 6666
+  ip_protocol       = "tcp"
+  description       = "Databricks SCC relay over back-end PrivateLink"
+}

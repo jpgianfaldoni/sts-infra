@@ -38,6 +38,17 @@ variable "private_endpoint_subnet_id" {
   type = string
 }
 
+variable "browser_authentication_enabled" {
+  description = "Create the browser_authentication private endpoint used for browser SSO over Private Link."
+  type        = bool
+  default     = false
+}
+
+variable "public_network_access_enabled" {
+  type    = bool
+  default = true
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

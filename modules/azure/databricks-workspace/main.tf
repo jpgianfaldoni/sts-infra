@@ -4,7 +4,7 @@ resource "azurerm_databricks_workspace" "this" {
   location                              = var.location
   sku                                   = "premium"
   managed_resource_group_name           = "${var.resource_prefix}-managed-rg"
-  public_network_access_enabled         = true
+  public_network_access_enabled         = var.public_network_access_enabled
   network_security_group_rules_required = "NoAzureDatabricksRules"
 
   custom_parameters {
@@ -44,6 +44,28 @@ resource "azurerm_private_endpoint" "backend" {
     name                           = "${var.resource_prefix}-backend-psc"
     private_connection_resource_id = azurerm_databricks_workspace.this.id
     subresource_names              = ["databricks_ui_api"]
+    is_manual_connection           = false
+  }
+
+  private_dns_zone_group {
+    name                 = "databricks"
+    private_dns_zone_ids = [azurerm_private_dns_zone.databricks.id]
+  }
+}
+
+resource "azurerm_private_endpoint" "browser_authentication" {
+  count = var.browser_authentication_enabled ? 1 : 0
+
+  name                = "${var.resource_prefix}-browser-authentication-pe"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  subnet_id           = var.private_endpoint_subnet_id
+  tags                = var.tags
+
+  private_service_connection {
+    name                           = "${var.resource_prefix}-browser-authentication-psc"
+    private_connection_resource_id = azurerm_databricks_workspace.this.id
+    subresource_names              = ["browser_authentication"]
     is_manual_connection           = false
   }
 

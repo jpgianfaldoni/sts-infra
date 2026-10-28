@@ -53,6 +53,22 @@ resource "azurerm_mssql_server" "this" {
   minimum_tls_version           = "1.2"
   public_network_access_enabled = false
   tags                          = var.tags
+
+  dynamic "azuread_administrator" {
+    for_each = var.entra_admin == null ? [] : [var.entra_admin]
+    content {
+      login_username              = azuread_administrator.value.login_username
+      object_id                   = azuread_administrator.value.object_id
+      tenant_id                   = azuread_administrator.value.tenant_id
+      azuread_authentication_only = false
+    }
+  }
+
+  # Microsoft Defender for SQL can enable express vulnerability assessment on
+  # new servers; do not fight the subscription's security settings.
+  lifecycle {
+    ignore_changes = [express_vulnerability_assessment_enabled]
+  }
 }
 resource "azurerm_mssql_database" "this" {
   name                                = var.database_name

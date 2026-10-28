@@ -1,5 +1,9 @@
 # AWS classic compute guides
 
+## Workspace control-plane connectivity
+
+- [Back-end PrivateLink using the AWS and Databricks UIs](workspace-back-end-private-link.md)
+
 ## Aurora PostgreSQL
 
 - [Overview](aurora-postgres/overview.md)

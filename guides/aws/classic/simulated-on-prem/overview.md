@@ -68,13 +68,14 @@ Inspect the output without printing credentials:
 ./infra output aws environments/local/my-hybrid-lab.tfvars
 ```
 
-Use the reported instance ID to open an SSM session:
+The `simulated_on_prem.ssm_command` output is the complete command, including
+the region and the AWS profile that `./infra` selected. It has this form:
 
 ```bash
 aws ssm start-session \
   --target i-0123456789abcdef0 \
   --region us-west-2 \
-  --profile your-aws-profile
+  --profile <profile-from-./infra-setup>
 ```
 
 Inside the host, verify the service with:

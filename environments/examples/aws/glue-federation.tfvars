@@ -1,6 +1,4 @@
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
-name_prefix           = "acme-glue-test"
-workspace_name        = "unused-for-aws-only-glue-test"
 
 features = {
   workspace       = false

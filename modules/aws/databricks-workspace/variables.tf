@@ -49,6 +49,31 @@ variable "public_subnet_cidr" {
   type = string
 }
 
+variable "backend_private_link" {
+  description = "Back-end PrivateLink configuration for workspace-to-control-plane traffic."
+  type = object({
+    enabled               = bool
+    endpoint_subnet_cidrs = list(string)
+    public_access_enabled = bool
+  })
+  default = {
+    enabled               = false
+    endpoint_subnet_cidrs = []
+    public_access_enabled = true
+  }
+
+  validation {
+    condition = !var.backend_private_link.enabled || (
+      length(var.backend_private_link.endpoint_subnet_cidrs) == 2 &&
+      alltrue([
+        for cidr in var.backend_private_link.endpoint_subnet_cidrs :
+        can(cidrnetmask(cidr)) && !strcontains(cidr, ":")
+      ])
+    )
+    error_message = "Back-end PrivateLink requires exactly two valid IPv4 endpoint subnet CIDRs."
+  }
+}
+
 variable "force_destroy_root_bucket" {
   description = "Allow deletion of a non-empty workspace root bucket."
   type        = bool
@@ -59,4 +84,10 @@ variable "tags" {
   type = map(string)
   default = {
   }
+}
+variable "network_connectivity_config_id" {
+  description = "Optional NCC attached to the workspace for serverless private endpoints."
+  type        = string
+  default     = null
+  nullable    = true
 }

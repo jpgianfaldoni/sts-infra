@@ -28,8 +28,13 @@ Do not install customer CLI profiles on a hosted application server.
 - Inject credentials only into the deployment worker and never copy them into
   tfvars, logs, plan metadata, or Terraform outputs.
 
-The wrapper supports the standard AWS and Databricks provider environment
-variables when no local profile overrides are set.
+The wrapper supports the standard AWS, Azure, and Databricks provider
+environment variables when no local profile overrides are set; see the
+[automation table](authentication.md#automation-and-applications). Use
+`./infra doctor <cloud> <tfvars> --json` as the "verify identity" step: it
+reports each identity and exits `0`, `10` (credentials missing or expired),
+`11` (wrong account or principal), or `12` (missing tool). Set `aws_account_id`
+in the tfvars so the AWS provider refuses to run in any other account.
 
 ## Application workflow
 
@@ -52,7 +57,9 @@ endpoint acceptance is another separately authorized external change.
 
 AWS workspace provisioning may require two jobs: account-level workspace
 infrastructure first, then workspace-scoped Unity Catalog resources after the
-workspace exists and its service principal assignment is ready.
+workspace exists and its service principal assignment is ready. AWS destroy
+also needs workspace authentication to terminate clusters; `destroy-plan`
+verifies it before planning.
 
 ## Production boundary
 

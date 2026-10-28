@@ -37,3 +37,13 @@ output "root_bucket_name" {
 output "network_id" {
   value = databricks_mws_networks.this.network_id
 }
+
+output "backend_private_link" {
+  description = "Back-end PrivateLink configuration and endpoint IDs."
+  value = {
+    enabled                    = var.backend_private_link.enabled
+    public_access_enabled      = var.backend_private_link.public_access_enabled
+    general_access_endpoint_id = try(aws_vpc_endpoint.general_access[0].id, null)
+    scc_relay_endpoint_id      = try(aws_vpc_endpoint.scc_relay[0].id, null)
+  }
+}

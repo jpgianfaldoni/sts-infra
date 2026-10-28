@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./infra list)",
+      "Bash(./infra validate *)",
+      "Bash(./infra doctor *)",
+      "Bash(./infra output *)",
+      "Bash(./infra plan *)",
+      "Bash(./infra endpoints aws status *)"
+    ],
+    "ask": [
+      "Bash(./infra setup *)",
+      "Bash(./infra apply *)",
+      "Bash(./infra destroy-plan *)",
+      "Bash(./infra destroy *)",
+      "Bash(./infra seed-access-plan *)",
+      "Bash(./infra seed-access-apply *)",
+      "Bash(./infra seed *)",
+      "Bash(./infra state-migrate *)",
+      "Bash(./infra endpoints aws accept *)",
+      "Bash(./infra endpoints aws reject *)"
+    ],
+    "deny": [
+      "Read(~/.aws/credentials)",
+      "Read(~/.aws/sso/cache/**)",
+      "Read(~/.aws/cli/cache/**)",
+      "Read(~/.databricks/**)",
+      "Read(~/.databrickscfg)",
+      "Read(~/.azure/**)",
+      "Read(.state/**)",
+      "Bash(aws sso login *)",
+      "Bash(aws configure export-credentials *)",
+      "Bash(az login)",
+      "Bash(az login *)",
+      "Bash(az account get-access-token *)",
+      "Bash(databricks auth login *)",
+      "Bash(databricks auth token *)",
+      "Bash(databricks auth describe --sensitive *)",
+      "Bash(terraform apply *)",
+      "Bash(terraform destroy *)",
+      "Bash(terraform * apply *)",
+      "Bash(terraform * destroy *)"
+    ]
+  }
+}

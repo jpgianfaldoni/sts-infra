@@ -3,10 +3,18 @@ resource "random_string" "suffix" {
   upper   = false
   special = false
 }
+ephemeral "random_password" "lakeflow_replication" {
+  count = var.lakeflow_connect_enabled ? 1 : 0
+
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+"
+}
 locals {
   name                = "${var.name_prefix}-${random_string.suffix.result}"
   port                = 5432
   enable_private_link = var.enable_classic_private_link || var.enable_serverless_private_link
+  engine_major        = try(split(".", var.engine_version)[0], "13")
 }
 
 data "aws_caller_identity" "current" {}
@@ -25,6 +33,56 @@ resource "aws_security_group" "database" {
   tags        = var.tags
 }
 
+resource "aws_db_parameter_group" "lakeflow_connect" {
+  count = var.lakeflow_connect_enabled ? 1 : 0
+
+  name_prefix = "${local.name}-lakeflow-"
+  family      = "postgres${local.engine_major}"
+  description = "Logical replication for Databricks Lakeflow Connect"
+
+  parameter {
+    name         = "rds.logical_replication"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
+  parameter {
+    name         = "max_replication_slots"
+    value        = "10"
+    apply_method = "pending-reboot"
+  }
+  parameter {
+    name         = "max_wal_senders"
+    value        = "10"
+    apply_method = "pending-reboot"
+  }
+  parameter {
+    name         = "max_slot_wal_keep_size"
+    value        = "2048"
+    apply_method = "pending-reboot"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_secretsmanager_secret" "lakeflow_replication" {
+  count = var.lakeflow_connect_enabled ? 1 : 0
+
+  name_prefix             = "${local.name}-lakeflow-replication-"
+  recovery_window_in_days = 7
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "lakeflow_replication" {
+  count = var.lakeflow_connect_enabled ? 1 : 0
+
+  secret_id = aws_secretsmanager_secret.lakeflow_replication[0].id
+  secret_string_wo = jsonencode({
+    username = "databricks_replication"
+    password = ephemeral.random_password.lakeflow_replication[0].result
+  })
+  secret_string_wo_version = 1
+}
+
 resource "aws_db_instance" "this" {
   identifier                  = "${local.name}-postgres"
   engine                      = "postgres"
@@ -37,6 +95,8 @@ resource "aws_db_instance" "this" {
   username                    = var.master_username
   manage_master_user_password = true
   port                        = local.port
+  parameter_group_name        = var.lakeflow_connect_enabled ? aws_db_parameter_group.lakeflow_connect[0].name : null
+  apply_immediately           = var.lakeflow_connect_enabled
   db_subnet_group_name        = module.network.db_subnet_group_name
   vpc_security_group_ids      = [aws_security_group.database.id]
   publicly_accessible         = false
@@ -91,7 +151,7 @@ resource "aws_vpc_security_group_ingress_rule" "database" {
 }
 resource "aws_lb" "this" {
   count                                                        = local.enable_private_link ? 1 : 0
-  name                                                         = substr("${local.name}-pl", 0, 32)
+  name                                                         = trimsuffix(substr("${local.name}-pl", 0, 32), "-")
   internal                                                     = true
   load_balancer_type                                           = "network"
   subnets                                                      = module.network.subnet_ids
@@ -102,7 +162,7 @@ resource "aws_lb" "this" {
 }
 resource "aws_lb_target_group" "this" {
   count              = local.enable_private_link ? 1 : 0
-  name               = substr("${local.name}-pg", 0, 32)
+  name               = trimsuffix(substr("${local.name}-pg", 0, 32), "-")
   port               = local.port
   protocol           = "TCP"
   target_type        = "ip"

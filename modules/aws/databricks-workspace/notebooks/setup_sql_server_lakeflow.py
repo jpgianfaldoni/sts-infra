@@ -158,6 +158,20 @@ with connect(master_username, master_password) as connection:
             "EXEC dbo.lakeflowFixPermissions @User = %s, @Tables = %s",
             (ingestion_username, CDC_TABLES),
         )
+        cursor.execute(
+            f"""
+            GRANT EXECUTE ON [dbo].[lakeflowFixPermissions]
+                TO [{ingestion_username}];
+            GRANT EXECUTE ON [dbo].[lakeflowSetupChangeTracking]
+                TO [{ingestion_username}];
+            GRANT EXECUTE ON [dbo].[lakeflowSetupChangeDataCapture]
+                TO [{ingestion_username}];
+            GRANT EXECUTE ON [dbo].[lakeflowDetectPlatform]
+                TO [{ingestion_username}];
+            GRANT EXECUTE ON [dbo].[lakeflowUtilityVersion_1_5]
+                TO [{ingestion_username}];
+            """
+        )
 
         cursor.execute(
             "SELECT dbo.lakeflowUtilityVersion_1_5(), "
@@ -204,11 +218,24 @@ with connect(ingestion_username, ingestion_password) as connection:
             "(SELECT COUNT(*) FROM dbo.customers), "
             "(SELECT COUNT(*) FROM dbo.orders), "
             "HAS_PERMS_BY_NAME(N'dbo', N'SCHEMA', N'SELECT'), "
-            "HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DATABASE STATE')"
+            "HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DATABASE STATE'), "
+            "dbo.lakeflowUtilityVersion_1_5(), "
+            "dbo.lakeflowDetectPlatform(), "
+            "HAS_PERMS_BY_NAME(N'dbo.lakeflowFixPermissions', N'OBJECT', N'EXECUTE'), "
+            "HAS_PERMS_BY_NAME(N'dbo.lakeflowSetupChangeTracking', N'OBJECT', N'EXECUTE'), "
+            "HAS_PERMS_BY_NAME(N'dbo.lakeflowSetupChangeDataCapture', N'OBJECT', N'EXECUTE'), "
+            "HAS_PERMS_BY_NAME(N'dbo.lakeflowDetectPlatform', N'OBJECT', N'EXECUTE'), "
+            "HAS_PERMS_BY_NAME(N'dbo.lakeflowUtilityVersion_1_5', N'OBJECT', N'EXECUTE')"
         )
-        customer_count, order_count, can_select_dbo, can_view_database_state = (
-            cursor.fetchone()
-        )
+        (
+            customer_count,
+            order_count,
+            can_select_dbo,
+            can_view_database_state,
+            ingestion_utility_version,
+            ingestion_platform,
+            *utility_execute_permissions,
+        ) = cursor.fetchone()
 
 if customer_count < 3 or order_count < 5:
     raise AssertionError(
@@ -218,6 +245,14 @@ if can_select_dbo != 1:
     raise AssertionError("The ingestion user cannot SELECT from the dbo schema")
 if can_view_database_state != 1:
     raise AssertionError("The ingestion user lacks VIEW DATABASE STATE")
+if str(ingestion_utility_version) != "1.5":
+    raise AssertionError(
+        "The ingestion user cannot execute the Lakeflow utility version function"
+    )
+if utility_execute_permissions != [1, 1, 1, 1, 1]:
+    raise AssertionError(
+        "The ingestion user lacks EXECUTE on one or more Lakeflow utility objects"
+    )
 
 print("Lakeflow Connect SQL Server source setup verified successfully")
 print(f"Utility version: {utility_version}")
@@ -226,6 +261,7 @@ print(f"Database CDC enabled: {bool(database_cdc_enabled)}")
 print(f"CDC-enabled demo tables: {tracked_table_count}")
 print(f"Lakeflow capture instances: {lakeflow_capture_instance_count}")
 print(f"Source rows: customers={customer_count}, orders={order_count}")
+print("Utility EXECUTE permissions verified for the ingestion user")
 
 dbutils.notebook.exit(
     json.dumps(
@@ -237,6 +273,7 @@ dbutils.notebook.exit(
             "lakeflow_capture_instances": lakeflow_capture_instance_count,
             "customers": customer_count,
             "orders": order_count,
+            "utility_execute_permissions_verified": True,
             "ingestion_user_verified": True,
         }
     )

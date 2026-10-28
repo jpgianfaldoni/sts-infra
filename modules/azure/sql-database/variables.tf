@@ -24,6 +24,15 @@ variable "admin_username" {
   type    = string
   default = "sqladminuser"
 }
+variable "entra_admin" {
+  description = "Optional Microsoft Entra administrator for the logical server. SQL authentication stays enabled."
+  type = object({
+    login_username = string
+    object_id      = string
+    tenant_id      = optional(string)
+  })
+  default = null
+}
 variable "tags" {
   type = map(string)
   default = {

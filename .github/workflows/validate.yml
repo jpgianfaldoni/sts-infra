@@ -1,0 +1,49 @@
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.6"
+          terraform_wrapper: false
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y jq ripgrep shellcheck
+      - name: Validate
+        run: ./infra validate ${{ matrix.cloud }}
+
+  # macOS ships bash 3.2 as /bin/bash; exercise the auth workflow there because
+  # operators commonly run ./infra with it.
+  auth-macos-bash32:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          command -v rg >/dev/null || brew install ripgrep
+          command -v jq >/dev/null || brew install jq
+      # ./infra uses `#!/usr/bin/env bash`; put /bin/bash first on PATH so the
+      # script under test also runs with 3.2 rather than a Homebrew bash.
+      - name: Prefer /bin/bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
+      - name: Auth workflow tests on bash 3.2
+        run: |
+          bash --version | head -1
+          bash tests/test_infra_auth_setup.sh

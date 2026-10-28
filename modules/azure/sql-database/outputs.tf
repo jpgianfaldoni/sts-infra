@@ -20,3 +20,22 @@ output "resource_group_name" {
 output "private_endpoint_id" {
   value = azurerm_private_endpoint.sql.id
 }
+output "server_id" {
+  description = "ARM ID of the Azure SQL logical server, used as the NCC private endpoint target."
+  value       = azurerm_mssql_server.this.id
+}
+output "server_name" {
+  value = azurerm_mssql_server.this.name
+}
+output "vnet_id" {
+  value = azurerm_virtual_network.this.id
+}
+output "vnet_name" {
+  value = azurerm_virtual_network.this.name
+}
+output "private_dns_zone_name" {
+  value = azurerm_private_dns_zone.sql.name
+}
+output "entra_admin_object_id" {
+  value = try(var.entra_admin.object_id, null)
+}

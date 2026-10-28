@@ -1,5 +1,6 @@
 .terraform/
 terraform.tfstate.d/
+terraform.tfstate.d
 *.tfstate
 *.tfstate.*
 *.tfplan
@@ -9,7 +10,7 @@ terraform.tfvars
 backend.tf
 .artifacts/
 .state/
-.sts-infra/
+.isaac/
 environments/local/
 __pycache__/
 *.py[cod]
@@ -18,3 +19,4 @@ __pycache__/
 .idea/
 .vscode/
 modules/aws/aurora-postgres/lambda/*.zip
+.claude/settings.local.json

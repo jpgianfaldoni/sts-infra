@@ -89,6 +89,9 @@ implicitly connect it to Databricks.
 | Component | What it creates |
 | --- | --- |
 | `workspace` | Premium VNet-injected Azure Databricks workspace with secure cluster connectivity, NAT, and a back-end private endpoint |
+| `test_vm` | Entra-accessible Linux VM in the workspace VNet for private DNS and front-end Private Link tests |
+| `external_volume_storage` | ADLS Gen2 storage, an access connector, configurable Unity Catalog metastore assignment, and an external volume |
+| `custom_dns` | A DNS forwarder VM (forwarding to Azure DNS) in a dedicated subnet, set as the workspace VNet's custom DNS server |
 | `sql_database` | Private Azure SQL logical server and database with a private endpoint and private DNS |
 | `sql_server_vm` | Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise |
 
@@ -131,6 +134,15 @@ disconnected for a networking exercise. On AWS, setting `region` is normally
 enough; the deployment derives two available zones unless you provide them
 explicitly.
 
+Resource names derive from the deployment ID (the tfvars file name) unless you
+set `name_prefix`, so two copies of the same template get distinct names.
+Examples use `metastore_mode = "auto"`, which reuses the only metastore in the
+region or creates one; see
+[metastore selection](guides/operations/deployment.md#metastore-selection) for
+shared accounts with many metastores. Kafka and RabbitMQ examples set
+`ephemeral_credentials = true` so broker passwords are written only to Secrets
+Manager and never to Terraform state.
+
 Available templates include:
 
 | Template | Scenario |
@@ -138,6 +150,7 @@ Available templates include:
 | `aws/workspace-postgres.tfvars` | Workspace, Unity Catalog, and PostgreSQL through classic VPC peering |
 | `aws/glue-federation.tfvars` | AWS-only S3, Glue catalog, sample table, and credential roles for a manual federation setup |
 | `aws/glue-federation-with-databricks.tfvars` | End-to-end Glue federation including the workspace and Unity Catalog connectivity resources |
+| `aws/workspace-backend-private-link.tfvars` | Classic workspace whose compute plane reaches the Databricks control plane through back-end PrivateLink |
 | `aws/workspace-postgres-no-connectivity.tfvars` | Workspace and PostgreSQL in disconnected VPCs |
 | `aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
 | `aws/workspace-kafka-streaming.tfvars` | Kafka streaming from classic compute through peering and serverless compute through NCC PrivateLink |
@@ -145,6 +158,9 @@ Available templates include:
 | `aws/workspace-simulated-on-prem-transit-gateway.tfvars` | Classic compute connected to simulated on-premises through Transit Gateway |
 | `aws/workspace-simulated-on-prem-serverless-private-link.tfvars` | Serverless compute connected to simulated on-premises through an NCC private endpoint |
 | `azure/workspace-sql.tfvars` | VNet-injected Azure workspace and private Azure SQL Database |
+| `azure/workspace-front-end-private-link.tfvars` | Serverless-capable workspace, test VM, and UI/API plus browser-authentication private endpoints |
+| `azure/workspace-private-storage-volume.tfvars` | Workspace and external volume backed by locked-down ADLS Gen2 storage, intentionally without a compute network path |
+| `azure/workspace-custom-dns.tfvars` | VNet-injected workspace whose VNet resolves names through a custom DNS server VM |
 
 ## Deploy the scenario
 
@@ -153,8 +169,9 @@ deployment, endpoint operations, and destruction. It validates authentication
 and applies only the exact saved plan that was reviewed.
 
 ```bash
-# First use on this machine: choose the local profiles and complete browser SSO.
-./infra setup aws environments/local/my-scenario.tfvars
+# Check authentication; fix anything missing with a browser login.
+./infra doctor aws environments/local/my-scenario.tfvars
+./infra setup aws environments/local/my-scenario.tfvars --yes
 
 ./infra validate aws
 ./infra plan aws environments/local/my-scenario.tfvars
@@ -162,14 +179,35 @@ and applies only the exact saved plan that was reviewed.
 ./infra apply aws environments/local/my-scenario.tfvars
 ```
 
-Setup writes only account identifiers and profile names to the per-user
-`~/.config/sts-infra/auth.json` file. AWS and Databricks credentials remain in
-their respective CLI caches. `AWS_PROFILE`, `DATABRICKS_ACCOUNT_PROFILE`, and
-`DATABRICKS_WORKSPACE_PROFILE` can still override the saved profile selection.
+`setup --yes` asks no questions. It reuses or creates the AWS IAM Identity
+Center and Databricks OAuth profiles, opens the browser logins that are needed,
+and writes only account identifiers and profile names to
+`~/.config/sts-infra/auth.json`. Credentials stay in the CLI caches. A new
+environment in an account you have already set up needs no further setup. On
+Azure, a single `az login` covers the subscription, the Databricks account, and
+the workspace.
 
-Set `DATABRICKS_WORKSPACE_PROFILE` after the workspace exists when a workflow
-needs workspace-level authentication. Use `./infra doctor <cloud> <tfvars>` to
-troubleshoot authentication.
+`./infra doctor <cloud> <tfvars> --json` reports each identity with a stable
+exit code (`0` ready, `10` browser login needed, `11` wrong account or profile,
+`12` missing tool), which makes the workflow straightforward for coding agents.
+See [authentication](guides/operations/authentication.md) for details, SSO
+profile creation, overrides, and automation.
+
+To seed a locked-down Azure external volume, use the temporary-access workflow:
+
+```bash
+./infra seed-access-plan azure environments/local/my-azure.tfvars
+./infra seed-access-apply azure environments/local/my-azure.tfvars
+./infra seed azure environments/local/my-azure.tfvars --source ./sample-data
+# Review the lockdown plan created by seed, then apply it.
+./infra apply azure environments/local/my-azure.tfvars
+```
+
+The temporary plan enables the public endpoint only for the operator's `/32`
+address and grants the signed-in Azure principal Blob Data Contributor. `seed`
+uploads with Azure OAuth, records and verifies SHA-256 metadata, then creates a
+normal saved plan that removes the operator role and restores the configured
+network lockdown. See the [deployment workflow](guides/operations/deployment.md#seed-a-locked-down-azure-external-volume).
 
 AWS PrivateLink endpoint services require explicit endpoint acceptance:
 
@@ -206,7 +244,9 @@ checklist.
   `.state/<cloud>/<deployment-id>`.
 - `components.json` is the machine-readable catalog of components and supported
   connectivity modes.
-- `AGENTS.md` defines the guardrails for infrastructure agents.
+- `AGENTS.md` defines the guardrails for infrastructure agents, and
+  `.claude/` holds the matching Claude Code permissions and the
+  `deploy-scenario` skill.
 - `modules/` contains the reusable cloud components.
 - `guides/` contains networking explanations, tutorials, authentication, state,
   and deployment procedures.

@@ -291,6 +291,11 @@ outbound TCP `5432` rule whose destination is the endpoint security group.
 
 ## 9. Accept the endpoint connection
 
+When `./infra` deploys this path (`connectivity.aurora_postgres.classic =
+"private_link"`), Terraform accepts the same-account classic endpoint
+connection automatically. The manual steps below apply when you build the path
+by hand.
+
 1. Return to the account that owns the Aurora endpoint service.
 2. Go to **VPC > Endpoint services** and select the service.
 3. Open **Endpoint connections**.
