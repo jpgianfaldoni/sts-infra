@@ -131,9 +131,11 @@ this repository):
 ./infra targets add field-aws --cloud aws --aws-account-id 123456789012 \
   --databricks-account-id <uuid> --region us-west-2 \
   [--sso-start-url <url> --sso-region <region> --sso-role-name <role>] \
-  [--aws-profile <name>] [--databricks-profile <name>] [--description <text>]
+  [--aws-profile <name>] [--databricks-profile <name>] [--description <text>] \
+  [--metastore <name>] [--classic-node-type <type>]
 ./infra targets add field-azure --cloud azure --subscription-id <uuid> \
-  [--tenant-id <uuid>] [--databricks-account-id <uuid>] [--location <location>]
+  [--tenant-id <uuid>] [--databricks-account-id <uuid>] [--location <location>] \
+  [--classic-node-type <type>]
 ./infra targets remove field-aws
 ```
 

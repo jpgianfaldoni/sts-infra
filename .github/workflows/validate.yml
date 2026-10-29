@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Upstream package releases can break the lab check's pinned drivers without
+  # any change here; the weekly run catches that before a lab does.
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -25,6 +29,18 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq ripgrep shellcheck
       - name: Validate
         run: ./infra validate ${{ matrix.cloud }}
+
+  # Installs each pinned driver set from PyPI and exercises the APIs the lab
+  # check notebook calls, on the Python version of the current LTS runtime.
+  lab-check-drivers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Lab check driver sets
+        run: python3 tests/test_lab_check_drivers.py
 
   # macOS ships bash 3.2 as /bin/bash; exercise the auth workflow there because
   # operators commonly run ./infra with it.

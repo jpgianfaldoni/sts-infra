@@ -129,6 +129,45 @@ def command_templates(args):
     return 0
 
 
+def block_bounds(lines, key):
+    """Return (start, end) line indexes of a top-level `key = {` block, or None."""
+    for start, line in enumerate(lines):
+        if re.match(rf"^{key}\s*=\s*\{{\s*$", strip_comment(line)):
+            for end in range(start + 1, len(lines)):
+                if re.match(r"^\}\s*$", strip_comment(lines[end])):
+                    return start, end
+    return None
+
+
+def apply_target_defaults(lines, name, target):
+    """Write the target's metastore and check node type into a new environment.
+
+    A target metastore replaces metastore_mode = "auto", which refuses to guess
+    in accounts with several metastores per region; templates that choose
+    another mode keep it.
+    """
+    metastore = target.get("metastore")
+    bounds = block_bounds(lines, "unity_catalog")
+    if metastore and bounds:
+        start, end = bounds
+        for i in range(start + 1, end):
+            if re.match(r'^\s*metastore_mode\s*=\s*"auto"', strip_comment(lines[i])):
+                lines[i : i + 1] = [
+                    f"  # Metastore from target '{name}'.",
+                    '  metastore_mode          = "existing"',
+                    f'  existing_metastore_name = "{metastore}"',
+                ]
+                break
+    node_type = target.get("classic_node_type")
+    if node_type:
+        bounds = block_bounds(lines, "lab_check")
+        if bounds is None:
+            lines += ["", "lab_check = {", f'  classic_node_type = "{node_type}" # from target \'{name}\'', "}"]
+        elif not any(re.match(r"^\s*classic_node_type\s*=", lines[i]) for i in range(*bounds)):
+            lines.insert(bounds[0] + 1, f'  classic_node_type = "{node_type}" # from target \'{name}\'')
+    return lines
+
+
 def command_new(args):
     if not DEPLOYMENT_ID.match(args.name) or args.name == "default":
         die("the environment name must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}", 2)
@@ -153,6 +192,7 @@ def command_new(args):
         ]
         insert_at = 1 if lines and lines[0].startswith("# Scenario:") else 0
         lines[insert_at:insert_at] = [f'target = "{args.target}"']
+        lines = apply_target_defaults(lines, args.target, target)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text("\n".join(lines).rstrip("\n") + "\n")
     print(f"Created {display(destination)} from {args.cloud}/{template.stem}.")

@@ -34,7 +34,9 @@ offer the closest scenario.
 
 If no target exists for the account, ask for the non-secret identifiers
 (account IDs, region, and for AWS SSO the start URL, SSO region, and role
-name) and run `./infra targets add`.
+name) and run `./infra targets add`. When the user names the metastore their
+labs share, add `--metastore <name>` so new environments skip the metastore
+question.
 
 ## 2. Create and explain
 
@@ -59,7 +61,7 @@ Branch on the exit code, not on prose:
 | --- | --- | --- |
 | 0 | ready | continue |
 | 10 | a browser login is needed | run `next_action.command` (it is `./infra setup ... --yes`) in the background, tell the user a browser window needs them, then `./infra doctor <cloud> <tfvars> --wait 600` |
-| 11 | wrong account, tenant, profile, or target, or no pinned AWS account | show `next_action.detail` to the user and ask which identity or target to use; do not guess |
+| 11 | wrong account, tenant, profile, or target, no pinned AWS account, or (check `metastore`) a Unity Catalog metastore to choose | show `next_action.detail` to the user and ask which identity, target, or metastore to use (offer the check's `suggested` metastore as the default); do not guess |
 | 12 | missing tool | tell the user which tool to install |
 
 If you cannot start a background process, ask the user to run

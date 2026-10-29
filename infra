@@ -16,8 +16,8 @@ DATABRICKS_CREDENTIAL_VARS=(DATABRICKS_CONFIG_PROFILE DATABRICKS_HOST DATABRICKS
 # Any of these means Azure automation supplies its own Databricks credentials.
 AZURE_DATABRICKS_AUTOMATION_VARS=(DATABRICKS_TOKEN DATABRICKS_CLIENT_ID DATABRICKS_AUTH_TYPE ARM_CLIENT_ID ARM_USE_MSI ARM_USE_OIDC)
 AUTH_DEPLOYMENT_FIELDS='["aws_account_id","aws_profile","azure_subscription_id","azure_tenant_id","databricks_account_id","databricks_account_profile","databricks_workspace_profile"]'
-TARGET_AWS_FIELDS='["cloud","description","aws_account_id","databricks_account_id","region","aws_profile","databricks_account_profile","aws_sso"]'
-TARGET_AZURE_FIELDS='["cloud","description","subscription_id","tenant_id","databricks_account_id","location","databricks_account_profile"]'
+TARGET_AWS_FIELDS='["cloud","description","aws_account_id","databricks_account_id","region","aws_profile","databricks_account_profile","aws_sso","metastore","classic_node_type"]'
+TARGET_AZURE_FIELDS='["cloud","description","subscription_id","tenant_id","databricks_account_id","location","databricks_account_profile","classic_node_type"]'
 
 if command -v shasum >/dev/null 2>&1; then
   SHA256_COMMAND=(shasum -a 256)
@@ -86,8 +86,10 @@ Target options (non-secret identifiers; saved in the local targets file):
   AWS:   --aws-account-id <id> --databricks-account-id <uuid> [--region <region>]
          [--sso-start-url <url> --sso-region <region> --sso-role-name <role>]
          [--aws-profile <name>] [--databricks-profile <name>]
+         [--metastore <name>]   Unity Catalog metastore new environments use instead of auto
   Azure: --subscription-id <uuid> [--tenant-id <uuid>] [--databricks-account-id <uuid>]
          [--location <location>] [--databricks-profile <name>]
+  Both:  [--classic-node-type <type>]   node type for the lab check cluster in new environments
 
 Authentication overrides for local operators:
   AWS_PROFILE
@@ -483,6 +485,8 @@ targets_add() {
       --subscription-id) [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || die_code 2 "--subscription-id must be a UUID"; key=subscription_id ;;
       --tenant-id) [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || die_code 2 "--tenant-id must be a UUID"; key=tenant_id ;;
       --location) key=location ;;
+      --metastore) key=metastore ;;
+      --classic-node-type) key=classic_node_type ;;
       *) die_code 2 "unknown targets add option: $flag" ;;
     esac
     entry="$(jq -c --arg path "$key" --arg value "$value" 'setpath($path | split("."); $value)' <<< "$entry")"
@@ -496,6 +500,7 @@ targets_add() {
       die_code 2 "pass all of --sso-start-url, --sso-region, and --sso-role-name, or none of them"
   else
     jq -e 'has("subscription_id")' <<< "$entry" >/dev/null || die_code 2 "Azure targets need --subscription-id"
+    jq -e 'has("metastore") | not' <<< "$entry" >/dev/null || die_code 2 "--metastore applies to AWS targets only"
   fi
   local verb="Added"
   if target_defined "$name"; then verb="Updated"; fi
@@ -1166,7 +1171,7 @@ checks_exit_code() {
   for status in ${CHECK_STATUSES[@]+"${CHECK_STATUSES[@]}"}; do
     case "$status" in
       missing_tool) code="$EXIT_MISSING_TOOL" ;;
-      mismatch|denied|unpinned) ((code >= EXIT_IDENTITY_MISMATCH)) || code="$EXIT_IDENTITY_MISMATCH" ;;
+      mismatch|denied|unpinned|choice_required|not_found) ((code >= EXIT_IDENTITY_MISMATCH)) || code="$EXIT_IDENTITY_MISMATCH" ;;
       login_required) ((code >= EXIT_LOGIN_REQUIRED)) || code="$EXIT_LOGIN_REQUIRED" ;;
     esac
   done
@@ -1393,6 +1398,101 @@ check_databricks_account() {
   esac
 }
 
+# Prints the resource name prefix Terraform derives for this deployment
+# (deployments/aws/main.tf: name_prefix, else the sanitized deployment ID).
+aws_name_prefix() {
+  local prefix
+  prefix="$(tfvar_value "$ENV_VARS" name_prefix)"
+  if [[ -z "$prefix" ]]; then
+    prefix="$(printf '%s' "$ENV_ID" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-24 | sed -E 's/-+$//')"
+    if [[ -z "$prefix" ]]; then
+      prefix=demo
+    elif [[ ! "$prefix" =~ ^[a-z] ]]; then
+      prefix="d-$prefix"
+    fi
+  fi
+  printf '%s' "$prefix"
+}
+
+# Prints metastore names other local AWS environments pin, most used first.
+local_pinned_metastores() {
+  local file name
+  for file in "$ROOT"/environments/local/*.tfvars; do
+    [[ -f "$file" && "$file" != "$ENV_VARS" ]] || continue
+    name="$(tfvar_value "$file" existing_metastore_name unity_catalog)"
+    [[ -z "$name" ]] || printf '%s\n' "$name"
+  done | sort | uniq -c | sort -rn | awk '{print $2}'
+}
+
+# AWS: resolves unity_catalog.metastore_mode against the account before any
+# plan. An ambiguous "auto" or a missing metastore otherwise surfaces only in
+# the second deployment stage, after the workspace has been built.
+check_metastore() {
+  local uc mode name region prefix list regional count suggestion candidates found
+  [[ "$ENV_CLOUD" == "aws" ]] || return 0
+  [[ "$AUTH_ACTION" == "check" || "$AUTH_ACTION" == "apply" ]] || return 0
+  uc="$(tfvar_value "$ENV_VARS" unity_catalog features)"
+  [[ "$uc" != "false" && "$(tfvar_value "$ENV_VARS" workspace features)" != "false" ]] || return 0
+  if [[ -f "${ENV_STATE:-}" ]] && jq -e 'any(.resources[]?; .type == "databricks_metastore_assignment" and any(.instances[]?; true))' "$ENV_STATE" >/dev/null; then
+    record_check metastore ok "assigned to the workspace (recorded in state)"
+    return 0
+  fi
+  name="$(tfvar_value "$ENV_VARS" existing_metastore_name unity_catalog)"
+  mode="$(tfvar_value "$ENV_VARS" metastore_mode unity_catalog)"
+  [[ -z "$name" ]] || mode=existing
+  mode="${mode:-create}"
+  region="$(setting_value region)"
+  region="${region:-us-west-2}"
+  prefix="$(aws_name_prefix)"
+  if [[ "$mode" == "create" ]]; then
+    record_check metastore ok "creates metastore $prefix-metastore in $region" "" mode=create
+    return 0
+  fi
+  if [[ "$AUTH_DB_ACCOUNT_OK" != 1 ]]; then
+    record_check metastore skipped "requires a valid Databricks account session" "" mode="$mode"
+    return 0
+  fi
+  if ! list="$(databricks_account_cli account metastores list --output json 2>/dev/null)" || ! jq -e 'type == "array"' <<< "$list" >/dev/null 2>&1; then
+    record_check metastore skipped "could not list the account's metastores; Terraform resolves metastore_mode = \"$mode\" during the second stage" "" mode="$mode"
+    return 0
+  fi
+  if [[ "$mode" == "existing" ]]; then
+    found="$(jq -r --arg name "$name" 'first(.[] | select(.name == $name) | .region // "") // "-"' <<< "$list")"
+    if [[ "$found" == "-" ]]; then
+      record_check metastore not_found "metastore '$name' (unity_catalog.existing_metastore_name) does not exist in Databricks account $AUTH_DB_ACCOUNT_ID" \
+        "set unity_catalog.existing_metastore_name in $DISPLAY_VARS to a metastore in $region" mode=existing metastore="$name"
+    elif [[ -n "$found" && "$found" != "$region" ]]; then
+      record_check metastore not_found "metastore '$name' is in $found, but the workspace is in $region; a workspace can only use a metastore in its own region" \
+        "set unity_catalog.existing_metastore_name in $DISPLAY_VARS to a metastore in $region" mode=existing metastore="$name"
+    else
+      record_check metastore ok "uses existing metastore $name in $region" "" mode=existing metastore="$name"
+    fi
+    return 0
+  fi
+  # auto: mirror modules/aws/unity-catalog so the decision is known up front.
+  if jq -e --arg managed "$prefix-metastore" 'any(.[]; .name == $managed)' <<< "$list" >/dev/null; then
+    record_check metastore ok "auto: keeps managing metastore $prefix-metastore" "" mode=auto metastore="$prefix-metastore"
+    return 0
+  fi
+  regional="$(jq -c --arg region "$region" --arg managed "$prefix-metastore" '[.[] | select(.region == $region and .name != $managed) | .name] | sort' <<< "$list")"
+  count="$(jq 'length' <<< "$regional")"
+  if [[ "$count" == 0 ]]; then
+    record_check metastore ok "auto: creates metastore $prefix-metastore (none exists in $region)" "" mode=auto
+  elif [[ "$count" == 1 ]]; then
+    record_check metastore ok "auto: reuses metastore $(jq -r '.[0]' <<< "$regional"), the only one in $region" "" mode=auto metastore="$(jq -r '.[0]' <<< "$regional")"
+  else
+    suggestion="$(local_pinned_metastores | while read -r candidate; do
+      jq -e --arg c "$candidate" 'index($c) != null' <<< "$regional" >/dev/null && { printf '%s' "$candidate"; break; }
+    done)"
+    candidates="$(jq -r '.[:8] | join(", ")' <<< "$regional")"
+    ((count <= 8)) || candidates="$candidates, ..."
+    record_check metastore choice_required \
+      "auto mode found $count metastores in $region ($candidates) and will not guess${suggestion:+; other local environments use $suggestion}" \
+      "set unity_catalog = { metastore_mode = \"existing\", existing_metastore_name = \"${suggestion:-<name>}\" } in $DISPLAY_VARS, or metastore_mode = \"create\" for a dedicated metastore" \
+      mode=auto region="$region" count="$count" suggested="$suggestion"
+  fi
+}
+
 # Sets WORKSPACE_REQUIREMENT (required|recommended|not_required) and
 # WORKSPACE_REQUIREMENT_DETAIL.
 workspace_auth_requirement() {
@@ -1508,6 +1608,7 @@ run_auth_checks() {
   fi
   check_databricks_account
   check_databricks_workspace
+  check_metastore
 }
 
 # Adds -var arguments for settings the tfvars file leaves to its target.
@@ -1559,6 +1660,8 @@ check_tag() {
     login_required) printf 'login' ;;
     mismatch) printf 'mismatch' ;;
     unpinned) printf 'unpinned' ;;
+    choice_required) printf 'choose' ;;
+    not_found) printf 'not found' ;;
     denied) printf 'denied' ;;
     missing_tool) printf 'missing' ;;
     *) printf '%s' "$1" ;;
@@ -1582,6 +1685,7 @@ next_action_json() {
   printf '%s\n' ${CHECK_RESULTS[@]+"${CHECK_RESULTS[@]}"} | jq -sc '
     (map(select(.status == "missing_tool")) +
      map(select(.status == "mismatch" or .status == "denied" or .status == "unpinned")) +
+     map(select(.status == "choice_required" or .status == "not_found")) +
      map(select(.status == "login_required"))) | first //
     null |
     if . == null then null else {
@@ -2858,7 +2962,12 @@ verify_deployment() {
         stage: ($failure.stage // null),
         error: (if $state.state.result_state == "SUCCESS" then null
                 else ($failure.message // $output.error // $state.state.state_message // "the task did not finish") end),
-        hint: ($failure.hint // null)
+        hint: ($failure.hint // null),
+        # Unclassified failures keep the end of the traceback so the cause is
+        # visible without opening the run.
+        trace: (if $state.state.result_state == "SUCCESS" or $failure.stage then null
+                else (($output.error_trace // "") | gsub("\u001b\\[[0-9;]*m"; "") | split("\n") |
+                      map(select(test("\\S"))) | .[-12:] | join("\n") | if . == "" then null else . end) end)
       }]' <<< "$results")"
   done < <(jq -r '.tasks[]? | [.task_key, (.run_id | tostring)] | @tsv' <<< "$run")
 
@@ -2887,7 +2996,8 @@ verify_deployment() {
       (if .status == "passed" then
          (if .rows then ": sample data " + (.rows | to_entries | map("\(.key)=\(.value)") | join(", ")) else ": reachable" end)
        else ": " + ((if .stage then .stage + ": " else "" end) + (.error // "")) end) +
-      (if .hint then "\n         hint: " + .hint else "" end)' <<< "$summary"
+      (if .hint then "\n         hint: " + .hint else "" end) +
+      (if .trace then "\n         traceback (last lines):\n" + (.trace | split("\n") | map("           " + .) | join("\n")) else "" end)' <<< "$summary"
     if [[ "$status" == "passed" ]]; then
       echo "All network paths work."
     else

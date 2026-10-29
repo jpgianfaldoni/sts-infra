@@ -61,11 +61,15 @@ resource "databricks_job" "this" {
     content {
       job_cluster_key = "classic"
       new_cluster {
-        spark_version      = data.databricks_spark_version.lts[0].id
-        node_type_id       = coalesce(var.classic_node_type, try(data.databricks_node_type.smallest[0].id, null))
-        num_workers        = 0
-        data_security_mode = "SINGLE_USER"
-        single_user_name   = data.databricks_current_user.me.user_name
+        spark_version = data.databricks_spark_version.lts[0].id
+        node_type_id  = coalesce(var.classic_node_type, try(data.databricks_node_type.smallest[0].id, null))
+        num_workers   = 0
+        # AWS node types without instance storage (m4, m5, c5, ...) are
+        # rejected unless the cluster can attach EBS volumes; autoscaling
+        # storage makes any node type work, on either cloud.
+        enable_elastic_disk = true
+        data_security_mode  = "SINGLE_USER"
+        single_user_name    = data.databricks_current_user.me.user_name
         spark_conf = {
           "spark.databricks.cluster.profile" = "singleNode"
           "spark.master"                     = "local[*]"

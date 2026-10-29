@@ -53,7 +53,7 @@ variable "managed_secret_scope" {
 }
 
 variable "classic_node_type" {
-  description = "Node type for the single-node classic check cluster. When null, the smallest general-purpose node type with at least 4 cores is used."
+  description = "Node type for the single-node classic check cluster. When null, the smallest general-purpose node type with at least 4 cores is used. Any node type works: the cluster attaches storage as it needs it."
   type        = string
   default     = null
   nullable    = true

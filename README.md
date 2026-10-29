@@ -125,7 +125,7 @@ environment files refer to it by name instead of repeating IDs:
 ./infra targets add field-aws --cloud aws \
   --aws-account-id 123456789012 --databricks-account-id <uuid> --region us-west-2 \
   --sso-start-url https://<org>.awsapps.com/start --sso-region us-east-1 --sso-role-name <role> \
-  --description "Field engineering sandbox"
+  --metastore <shared-metastore> --description "Field engineering sandbox"
 ./infra targets add field-azure --cloud azure \
   --subscription-id <uuid> --databricks-account-id <uuid> --location westus2
 ./infra targets
@@ -180,7 +180,8 @@ set `name_prefix`, so two copies of the same template get distinct names.
 Examples use `metastore_mode = "auto"`, which reuses the only metastore in the
 region or creates one; see
 [metastore selection](guides/operations/deployment.md#metastore-selection) for
-shared accounts with many metastores. Kafka and RabbitMQ examples set
+shared accounts with many metastores; a target's `--metastore` replaces `auto`
+in new environments. Kafka and RabbitMQ examples set
 `ephemeral_credentials = true` so broker passwords are written only to Secrets
 Manager and never to Terraform state.
 

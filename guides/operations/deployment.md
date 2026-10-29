@@ -138,10 +138,18 @@ job and a notebook under `/Shared/sts-infra/<prefix>/`. `verify`:
    `.artifacts/<cloud>/<deployment-id>/verify.json`.
 
 `verify` exits `13` when a check fails and reports the failing stage (`dns`,
-`tcp`, `driver`, `credentials`, or `login`) with a hint. The checks install
-their database driver from PyPI, so the compute needs outbound internet
-access. Set `lab_check.classic_node_type` if the default node type is not
-available in the region.
+`tcp`, `driver`, `credentials`, `login`, `seed`, or `query`) with a hint. An
+error no check anticipated is reported at the step it interrupted (or at
+`driver` when it is raised inside the driver), with the installed driver
+versions and the end of the traceback.
+
+The checks install their database driver from PyPI, so the compute needs
+outbound internet access. Each driver is an exact, complete set of pinned
+packages installed with `--no-deps`, so an upstream release cannot change what
+a lab runs; `python3 tests/test_lab_check_drivers.py` installs every set and
+exercises the APIs the checks call (CI runs it weekly). The check cluster
+attaches storage as it needs it, so any node type works; set
+`lab_check.classic_node_type` if the default is not available in the region.
 
 ## Resume and inventory
 
@@ -165,9 +173,15 @@ verify after an apply.
 - `auto`: keep the metastore this deployment created earlier, reuse the only
   metastore in the region, or create one if the region has none.
 
-Shared accounts often hold many metastores per region. In that case `auto` stops
-the plan and lists some of them instead of attaching the workspace to another
-team's metastore; choose `existing` or `create`.
+Shared accounts often hold many metastores per region. In that case `auto`
+refuses to attach the workspace to another team's metastore; choose `existing`
+or `create`. On AWS, `./infra doctor` (and the preflight of `plan`) resolves the
+mode against the account before the first stage, so the choice comes up before
+the workspace is built: it exits `11` with check `metastore` and status
+`choice_required`, or `not_found` when `existing_metastore_name` is missing or
+in another region. Save the metastore your labs share in the target
+(`./infra targets add ... --metastore <name>`), and `./infra new` writes it
+into every new environment whose template uses `auto`.
 
 ## Outputs and endpoint approval
 

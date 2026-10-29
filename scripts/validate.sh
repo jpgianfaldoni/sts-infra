@@ -23,6 +23,7 @@ fi
 bash "$ROOT/tests/test_infra_auth_setup.sh"
 python3 "$ROOT/tests/check_manifest.py"
 python3 "$ROOT/tests/test_infra_scenario.py"
+python3 "$ROOT/tests/test_lab_check_drivers.py" --static
 python3 "$ROOT/tests/check_python_syntax.py"
 python3 "$ROOT/tests/check_links.py"
 python3 "$ROOT/tests/check_docs_commands.py"

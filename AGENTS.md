@@ -66,10 +66,17 @@ identifiers and create one:
 ```bash
 ./infra targets add <name> --cloud aws --aws-account-id <12 digits> \
   --databricks-account-id <uuid> --region <region> \
-  --sso-start-url <url> --sso-region <region> --sso-role-name <role>
+  --sso-start-url <url> --sso-region <region> --sso-role-name <role> \
+  [--metastore <name>] [--classic-node-type <type>]
 ./infra targets add <name> --cloud azure --subscription-id <uuid> \
   [--tenant-id <uuid>] [--databricks-account-id <uuid>] [--location <location>]
 ```
+
+Shared accounts usually hold many Unity Catalog metastores per region, where
+`metastore_mode = "auto"` refuses to choose. When the user names the metastore
+their labs share, store it with `--metastore` (and the user's preferred check
+node type with `--classic-node-type`): `./infra new` then writes both into
+every new environment for that target.
 
 AWS environments must pin their account through a target or
 `aws_account_id`; `doctor` and `plan` exit 11 with status `unpinned`
@@ -80,8 +87,8 @@ otherwise.
 1. Run `./infra doctor <cloud> <environment.tfvars> --json` and branch on its
    exit code: `0` ready, `10` a browser login is required, `11` the identity,
    account, tenant, profile, or target does not match the environment (or the
-   AWS account is not pinned), `12` a tool is missing. `next_action.command`
-   is the exact fix.
+   AWS account is not pinned, or the Unity Catalog metastore needs a choice),
+   `12` a tool is missing. `next_action.command` is the exact fix.
 2. For exit `10`, run `./infra setup <cloud> <environment.tfvars> --yes`. With
    `--yes` (or without a terminal) setup asks no questions: it reuses or
    discovers profiles, opens the browser login for the user, and saves only
@@ -90,7 +97,9 @@ otherwise.
    with `./infra doctor <cloud> <environment.tfvars> --wait 600` instead of
    asking the user to confirm.
 3. For exit `11`, show the detail to the user and let them choose the identity,
-   profile, or target. Do not guess or switch accounts yourself.
+   profile, target, or (check `metastore`) the metastore. Do not guess or
+   switch accounts yourself. The `metastore` check offers `suggested`, a
+   metastore other local environments already pin; offer it as the default.
 4. Never ask the user to paste credentials, and never read or print AWS, Azure,
    or Databricks credential or token caches. Do not run `aws sso login`,
    `az login`, or `databricks auth login` directly; `./infra setup` runs them
@@ -136,8 +145,9 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
   (AWS) or uses the Key Vault-backed scope (Azure), waits for serverless
   endpoint rules to become `ESTABLISHED`, runs the lab check job, and reports
   each path. Exit `0` means every path works; exit `13` means a check failed,
-  with the failing stage (`dns`, `tcp`, `driver`, `credentials`, `login`) and a
-  hint. Show the user the results, including the sample-data row counts.
+  with the failing stage (`dns`, `tcp`, `driver`, `credentials`, `login`,
+  `seed`, `query`) and a hint; unexpected errors also print the end of the
+  traceback. Show the user the results, including the sample-data row counts.
 - `./infra status <cloud> <tfvars> --json` returns `next_action` for a
   deployment from local state, which is the way to resume work in a new
   session. `./infra ls` lists every local deployment and how long it has
@@ -150,12 +160,13 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
 | `doctor` exit 11, status `unpinned` | Set `target` (or `aws_account_id`) in the tfvars. |
 | `doctor` exit 11 on `target` | The target is undefined, for the other cloud, or the tfvars overrides it with different IDs; see `detail`. |
 | Apply stops with an expired session | Run `./infra setup <cloud> <tfvars> --yes --force-login`, then plan again; `./infra` invalidated the failed plan. |
-| `metastore_mode = "auto"` found several metastores | Ask the user which metastore to use; set `unity_catalog.metastore_mode = "existing"` and `existing_metastore_name`. |
+| `doctor` exit 11 on `metastore`, status `choice_required` | `metastore_mode = "auto"` found several metastores in the region. Ask the user which to use (offer `suggested`); set `unity_catalog.metastore_mode = "existing"` and `existing_metastore_name`, and offer to save it in the target with `--metastore`. |
+| `doctor` exit 11 on `metastore`, status `not_found` | `existing_metastore_name` does not exist or is in another region; see `detail`. |
 | `verify` fails at `dns` or `tcp` on serverless | The endpoint rule may still be provisioning: check `./infra endpoints <cloud> status`, wait a few minutes, rerun `verify`. |
 | `verify` fails at `dns` or `tcp` on classic | The path is broken or deliberately absent; compare with `./infra explain`. |
-| `verify` fails at `driver` | The compute has no outbound internet access to PyPI for the database driver. |
+| `verify` fails at `driver` | "could not install": the compute has no outbound internet access to PyPI. "Unexpected error": the pinned driver set in `modules/shared/lab-check/notebooks/lab_check.py` is incompatible; the hint lists the installed versions, and `python3 tests/test_lab_check_drivers.py` reproduces it locally. |
 | `verify` fails at `login` or `credentials` | Rerun `verify` (it refreshes the credentials); on Azure, check the Key Vault-backed scope. |
-| The classic check cluster cannot start | The region lacks capacity or quota for the default node type; set `lab_check.classic_node_type`. |
+| The classic check cluster cannot start | The region lacks capacity or quota for the default node type; set `lab_check.classic_node_type` (or `--classic-node-type` on the target). |
 | Destroy refuses to start on AWS | It needs the workspace login to terminate clusters: run `./infra setup aws <tfvars> --yes`. |
 
 ## 6. Destroy

@@ -134,7 +134,7 @@ case "${1:-} ${2:-}" in
     else
       [[ -n "${TEST_DB_ENV_CREDENTIALS:-}" ]] || exit 1
     fi
-    if [[ "$2" == "workspaces" ]]; then echo "${TEST_DB_WORKSPACES:-[]}"; else echo '[]'; fi
+    if [[ "$2" == "workspaces" ]]; then echo "${TEST_DB_WORKSPACES:-[]}"; else echo "${TEST_DB_METASTORES:-[]}"; fi
     ;;
   "current-user me")
     if [[ -n "$profile" ]]; then
@@ -162,7 +162,9 @@ case "${1:-} ${2:-}" in
     printf '{"run_id":77,"run_page_url":"https://dbc-lab.cloud.databricks.com/jobs/55/runs/77","state":{"life_cycle_state":"TERMINATED"},"tasks":[{"task_key":"rds_postgres_classic","run_id":78,"state":{"life_cycle_state":"TERMINATED","result_state":"%s"}}]}\n' "$result"
     ;;
   "jobs get-run-output")
-    if [[ -n "${TEST_VERIFY_FAIL:-}" ]]; then
+    if [[ -n "${TEST_VERIFY_OUTPUT:-}" ]]; then
+      echo "$TEST_VERIFY_OUTPUT"
+    elif [[ -n "${TEST_VERIFY_FAIL:-}" ]]; then
       echo '{"error":"RuntimeError: LAB CHECK FAILED at tcp: could not open a TCP connection to db.internal:5432 within 15s (timed out). Hint: Check the peering routes."}'
     else
       echo '{"notebook_output":{"result":"{\"status\":\"passed\",\"seeded\":true,\"rows\":{\"customers\":3,\"orders\":5}}"}}'
@@ -389,10 +391,35 @@ pass "AWS setup is a no-op when sessions are valid"
 # --- AWS: doctor ------------------------------------------------------------
 run "$INFRA" doctor aws "$AWS_VARS" --json
 expect_code 0 "doctor with valid sessions"
-expect_json '.ready and ([.checks[].id] == ["tools", "aws", "databricks_account", "databricks_workspace"]) and
+expect_json '.ready and ([.checks[].id] == ["tools", "aws", "databricks_account", "databricks_workspace", "metastore"]) and
   .checks[1].account_id == "123456789012" and .checks[1].source == "deployment mapping" and
   .checks[3].status == "not_required" and .next_action == null' "doctor JSON is not ready"
 pass "doctor --json reports ready"
+
+# The metastore check resolves unity_catalog.metastore_mode before any plan.
+cp "$AWS_VARS" "$TEST_DIR/aws-lab.tfvars.orig"
+METASTORES='[{"name":"team-a","region":"us-east-1"},{"name":"team-b","region":"us-east-1"},{"name":"west","region":"us-west-2"}]'
+printf '\nunity_catalog = {\n  metastore_mode = "auto"\n}\n' >> "$AWS_VARS"
+printf 'unity_catalog = {\n  existing_metastore_name = "team-b"\n}\n' > "$ROOT/environments/local/aws-pinned.tfvars"
+run TEST_DB_METASTORES="$METASTORES" "$INFRA" doctor aws "$AWS_VARS" --json
+expect_code 11 "doctor with an ambiguous auto metastore"
+expect_json '.next_action.check == "metastore" and .next_action.status == "choice_required" and
+  (.checks[-1].detail | contains("found 2 metastores in us-east-1 (team-a, team-b)")) and .checks[-1].suggested == "team-b" and
+  (.next_action.command | contains("existing_metastore_name = \"team-b\""))' "ambiguous auto metastore not reported"
+run TEST_DB_METASTORES='[{"name":"team-a","region":"us-east-1"},{"name":"west","region":"us-west-2"}]' "$INFRA" doctor aws "$AWS_VARS" --json
+expect_code 0 "doctor with one regional metastore"
+expect_json '.checks[-1].status == "ok" and .checks[-1].metastore == "team-a"' "auto reuse not reported"
+cp "$TEST_DIR/aws-lab.tfvars.orig" "$AWS_VARS"
+printf '\nunity_catalog = {\n  existing_metastore_name = "west"\n}\n' >> "$AWS_VARS"
+run TEST_DB_METASTORES="$METASTORES" "$INFRA" doctor aws "$AWS_VARS"
+expect_code 11 "doctor with a metastore in another region"
+expect_text "is in us-west-2, but the workspace is in us-east-1" "region mismatch not reported"
+run TEST_DB_METASTORES="$METASTORES" "$INFRA" plan aws "$AWS_VARS"
+expect_code 11 "plan with a metastore in another region"
+expect_text "nothing was changed" "plan did not stop at the preflight"
+cp "$TEST_DIR/aws-lab.tfvars.orig" "$AWS_VARS"
+rm -f "$ROOT/environments/local/aws-pinned.tfvars"
+pass "doctor and plan resolve the Unity Catalog metastore before Terraform runs"
 
 rm "$TEST_STATE_DIR/aws-login-sts-aws-123456789012"
 run "$INFRA" doctor aws "$AWS_VARS" --json
@@ -779,6 +806,14 @@ expect_code 13 "verify with a failing check"
 expect_text "[FAIL] rds_postgres from classic compute over peering: tcp: could not open a TCP connection" "failure not reported"
 expect_text "hint: Check the peering routes." "hint not reported"
 pass "failed checks exit 13 with the failing stage and a hint"
+
+UNCLASSIFIED_OUTPUT="$(jq -cn '{error: "KeyError: '"'"'host'"'"'", error_trace: "Traceback (most recent call last):\n\u001b[0;32m  File lab_check.py, line 3\u001b[0m\n\nKeyError: '"'"'host'"'"'"}')"
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" TEST_VERIFY_FAIL=1 TEST_VERIFY_OUTPUT="$UNCLASSIFIED_OUTPUT" STS_INFRA_VERIFY_INTERVAL=0 "$INFRA" verify aws "$AWS_VARS"
+expect_code 13 "verify with an unclassified failure"
+expect_text "traceback (last lines):" "traceback not reported for an unclassified failure"
+expect_text "  File lab_check.py, line 3" "traceback lines missing or still colored"
+[[ "$OUT" != *$'\e['* ]] || fail "ANSI escapes leaked into the verify output"
+pass "unclassified failures report the end of the traceback"
 
 DESTROY_OUTPUT='{"workspace_url": {"sensitive": false, "value": "https://dbc-lab.cloud.databricks.com"}, "connectivity": {"sensitive": false, "value": {"rds_postgres": {"classic": {"mode": "none"}, "serverless": {"mode": "private_link", "endpoint_service_id": "vpce-svc-1"}}}}}'
 DESTROY_CONNECTIONS='{"VpcEndpointConnections": [{"VpcEndpointId": "vpce-db", "VpcEndpointOwner": "565502421330", "VpcEndpointState": "available"}, {"VpcEndpointId": "vpce-classic", "VpcEndpointOwner": "123456789012", "VpcEndpointState": "available"}]}'

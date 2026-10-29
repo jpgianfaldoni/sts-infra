@@ -200,6 +200,27 @@ class NewEnvironment(unittest.TestCase):
         self.assertTrue(created.startswith('# Scenario: Test lab\ntarget = "lab-aws"\n'))
         self.assertNotIn(scenario.PLACEHOLDER_ID, created)
 
+    def test_target_defaults_replace_auto_metastore_and_set_node_type(self):
+        target = {"metastore": "shared-uc", "classic_node_type": "m5d.large"}
+        lines = ["unity_catalog = {", '  metastore_mode = "auto"', "}"]
+        created = "\n".join(scenario.apply_target_defaults(lines, "lab-aws", target))
+        self.assertIn('metastore_mode          = "existing"', created)
+        self.assertIn('existing_metastore_name = "shared-uc"', created)
+        self.assertNotIn('"auto"', created)
+        self.assertIn('lab_check = {\n  classic_node_type = "m5d.large"', created)
+
+        # A template that chose create keeps it; an existing lab_check block gains the node type.
+        lines = ["unity_catalog = {", '  metastore_mode = "create"', "}", "lab_check = {", "  enabled = true", "}"]
+        created = "\n".join(scenario.apply_target_defaults(lines, "lab-aws", target))
+        self.assertIn('metastore_mode = "create"', created)
+        self.assertNotIn("shared-uc", created)
+        self.assertEqual(created.count("lab_check = {"), 1)
+        self.assertIn('lab_check = {\n  classic_node_type = "m5d.large"', created)
+
+        # Without target defaults nothing changes.
+        lines = ["unity_catalog = {", '  metastore_mode = "auto"', "}"]
+        self.assertEqual(scenario.apply_target_defaults(list(lines), "lab-aws", {}), lines)
+
 
 class Templates(unittest.TestCase):
     def test_every_template_has_a_scenario_description(self):
