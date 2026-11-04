@@ -21,7 +21,7 @@ variable "databricks_workspace_profile" {
   nullable    = true
 }
 variable "aws_account_id" {
-  description = "Optional expected AWS account ID. When set, the AWS provider refuses to operate in any other account."
+  description = "Expected AWS account ID, from the tfvars or the target. The AWS provider refuses to operate in any other account, and ./infra refuses environments without a pinned account."
   type        = string
   default     = null
   nullable    = true
@@ -399,4 +399,38 @@ variable "tags" {
   default = { ManagedBy = "terraform"
     Environment = "demo"
   }
+}
+variable "target" {
+  description = "Named account target from the local targets file (./infra targets). ./infra resolves it to the AWS account, Databricks account, and default region; Terraform only records it."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.target == null || can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", var.target))
+    error_message = "target must be null or a target name such as \"field-sandbox\"."
+  }
+}
+variable "workspace_resources_enabled" {
+  description = "Set by ./infra; do not set it in tfvars. False for the first stage of a new deployment, before the workspace login exists. Unity Catalog, Glue federation catalogs, and the lab check job are then added by the next plan."
+  type        = bool
+  default     = true
+}
+variable "endpoint_approval" {
+  description = "How ./infra handles serverless NCC endpoint connections after apply: auto accepts the connections this deployment requested; manual leaves them for ./infra endpoints aws accept."
+  type        = string
+  default     = "auto"
+
+  validation {
+    condition     = contains(["auto", "manual"], var.endpoint_approval)
+    error_message = "endpoint_approval must be auto or manual."
+  }
+}
+variable "lab_check" {
+  description = "Sample data and connectivity checks run by ./infra verify."
+  type = object({
+    enabled           = optional(bool, true)
+    classic_node_type = optional(string)
+  })
+  default = {}
 }

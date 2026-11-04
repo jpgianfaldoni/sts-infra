@@ -233,3 +233,34 @@ output "pending_endpoint_acceptances" {
     if !contains(["available", "ESTABLISHED"], coalesce(connection.state, "unknown"))
   ]
 }
+
+output "deployment_stage" {
+  description = "foundation while workspace-level resources wait for the workspace login (see ./infra plan); complete otherwise."
+  value       = var.workspace_resources_enabled || !local.workspace_resources_requested ? "complete" : "foundation"
+}
+
+output "workspace_resources_requested" {
+  description = "Whether the configuration has workspace-level resources (Unity Catalog, Glue catalogs, lab check job). ./infra skips the second stage when it does not."
+  value       = local.workspace_resources_requested
+}
+
+output "lab_check" {
+  description = "Sample data and network path checks. ./infra verify copies the source credentials into the secret scope, runs the job, and reports each path."
+  # A conditional rather than try(): try() hides the known check keys behind
+  # the job ID, which is unknown until apply.
+  value = local.lab_check_enabled ? {
+    job_id       = module.lab_check[0].job_id
+    job_url      = module.lab_check[0].job_url
+    secret_scope = module.lab_check[0].managed_secret_scope
+    credentials  = local.lab_check_credentials
+    checks       = module.lab_check[0].checks
+  } : null
+}
+
+output "serverless_connectivity" {
+  description = "NCC used for serverless PrivateLink, with one entry per private endpoint rule."
+  value = length(local.ncc_rules) > 0 ? {
+    network_connectivity_config_id = local.network_connectivity_config_id
+    rules                          = try(module.ncc[0].rules, {})
+  } : null
+}

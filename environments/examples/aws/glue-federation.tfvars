@@ -1,3 +1,4 @@
+# Scenario: AWS-only S3 sample data and Glue catalog for a manual federation exercise (no workspace)
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 
 features = {
@@ -22,3 +23,7 @@ tags = {
   Environment = "demo"
   Purpose     = "glue-federation"
 }
+
+# Disposable lab: destroy may empty versioned buckets, lift database deletion
+# protection, and skip final snapshots. Set false to keep data on destroy.
+allow_destructive_demo_cleanup = true

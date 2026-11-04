@@ -845,3 +845,117 @@ run "reject_unknown_serverless_mode" {
 
   expect_failures = [var.connectivity]
 }
+
+run "lab_check_seeds_sql_over_serverless_private_link" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      sql_database = true
+    }
+    connectivity = {
+      sql_database = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition     = keys(output.lab_check.checks) == ["sql_database_serverless"]
+    error_message = "Only the serverless path is configured, so only it is checked."
+  }
+
+  assert {
+    condition = (
+      output.lab_check.checks.sql_database_serverless.engine == "sqlserver" &&
+      output.lab_check.checks.sql_database_serverless.seeded &&
+      output.lab_check.secret_scope == "sts-infra"
+    )
+    error_message = "The Azure SQL check must load the sample data with the Key Vault-backed credentials."
+  }
+}
+
+run "lab_check_classic_peering_then_serverless" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      sql_database = true
+    }
+    connectivity = {
+      sql_database = {
+        serverless = "private_link"
+      }
+    }
+    sql_database = {
+      workspace_peering_enabled = true
+    }
+  }
+
+  assert {
+    condition     = output.lab_check.checks.sql_database_classic.mode == "peering"
+    error_message = "VNet peering is the classic path to Azure SQL."
+  }
+
+  assert {
+    condition     = output.lab_check.checks.sql_database_serverless.run_after == "sql_database_classic"
+    error_message = "The serverless check must run after the classic one."
+  }
+}
+
+run "lab_check_without_secret_scope_tests_tcp_only" {
+  command = plan
+
+  variables {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      sql_database = true
+    }
+    sql_database = {
+      workspace_peering_enabled = true
+    }
+    key_vault = {
+      databricks_secret_scope_enabled = false
+    }
+  }
+
+  assert {
+    condition     = output.lab_check.checks.sql_database_classic.engine == "tcp" && !output.lab_check.checks.sql_database_classic.seeded
+    error_message = "Without credentials the check can only test TCP reachability."
+  }
+}
+
+run "no_lab_check_for_disconnected_sql" {
+  command = plan
+
+  variables {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      sql_database = true
+    }
+  }
+
+  assert {
+    condition     = output.lab_check == null
+    error_message = "A disconnected Azure SQL database has nothing to check."
+  }
+}
+
+run "reject_unknown_azure_endpoint_approval" {
+  command = plan
+
+  variables {
+    subscription_id   = "00000000-0000-0000-0000-000000000000"
+    endpoint_approval = "later"
+  }
+
+  expect_failures = [var.endpoint_approval]
+}

@@ -27,22 +27,33 @@ already serves the workspace. Start from
 `environments/examples/azure/workspace-sql-serverless-private-link.tfvars`.
 
 Databricks then creates a managed private endpoint that stays **Pending** until
-the SQL server owner approves it. Approval is an explicit step, like AWS
-endpoint acceptance:
+the SQL server owner approves it. With the default `endpoint_approval = "auto"`,
+`./infra apply` approves exactly the connections this deployment requested.
+To practice the approval step yourself, set `endpoint_approval = "manual"`:
 
 ```bash
 ./infra apply azure environments/local/my-sql.tfvars
 ./infra endpoints azure status environments/local/my-sql.tfvars
-# Review component, resource_id, and endpoint_name, then:
+# Review component, resource_id, endpoint_name, and connection_id, then:
 ./infra endpoints azure approve environments/local/my-sql.tfvars \
-  --resource-id <resource_id> --endpoint-name <endpoint_name>
+  --connection-id <connection_id>
 ```
 
-`status` lists `pending_endpoint_approvals`. After approval, the rule reports
-`ESTABLISHED` on the next plan or refresh, and serverless compute can reach
-`<server>.database.windows.net:1433`. Create the Unity Catalog connection as
-described in [Configure the SQL connection](#8-configure-the-sql-connection);
-the SQL credentials are in the Key Vault and the Key Vault-backed secret scope
+`status` lists `pending_endpoint_approvals` with the live `azure_status` and
+the `connection_id` to approve. After approval, the rule reports `ESTABLISHED`
+a few minutes later, and serverless compute can reach
+`<server>.database.windows.net:1433`. Then run:
+
+```bash
+./infra verify azure environments/local/my-sql.tfvars
+```
+
+`verify` waits for the rule to become `ESTABLISHED`, loads the sample tables
+`customers` and `orders`, and reports whether serverless (and, with
+`sql_database.workspace_peering_enabled = true`, classic) compute reaches the
+database. Create the Unity Catalog connection as described in
+[Configure the SQL connection](#8-configure-the-sql-connection); the SQL
+credentials are in the Key Vault and the Key Vault-backed secret scope
 described in the [deployment notes](overview.md).
 
 The rest of this guide explains the components and the equivalent manual

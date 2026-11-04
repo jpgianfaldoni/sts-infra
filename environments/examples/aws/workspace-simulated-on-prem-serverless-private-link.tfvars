@@ -1,3 +1,4 @@
+# Scenario: Serverless compute reaches a simulated on-premises service over PrivateLink
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 
 features = {

@@ -1,3 +1,4 @@
+# Scenario: Glue catalog federation end to end: S3 sample data, Glue table, and the Unity Catalog foreign catalog
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 
 features = {
