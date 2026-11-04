@@ -35,11 +35,11 @@ AUTH_WARNINGS=()
 usage() {
   cat <<'EOF'
 Usage:
-  ./infra list
+  ./infra list [<aws|azure>] [--json]
   ./infra templates [<aws|azure>] [--json]
   ./infra new <aws|azure> <name> --template <template> [--target <target>]
   ./infra explain <aws|azure> <environment.tfvars> [--json]
-  ./infra ls [--json]
+  ./infra ls [--all] [--json]
   ./infra status <aws|azure> <environment.tfvars> [--json]
   ./infra targets [--json]
   ./infra targets add <name> --cloud <aws|azure> [target options]
@@ -3027,11 +3027,7 @@ main() {
   INFRA_COMMAND_LINE="./infra $*"
   command -v jq >/dev/null 2>&1 || die_code "$EXIT_MISSING_TOOL" "jq is required"
   case "$command" in
-    list)
-      [[ $# -eq 1 ]] || { usage; exit 2; }
-      jq . "$ROOT/components.json"
-      ;;
-    templates|new|explain|ls|status)
+    list|templates|new|explain|ls|status)
       command -v python3 >/dev/null 2>&1 || die_code "$EXIT_MISSING_TOOL" "python3 is required for ./infra $command"
       STS_INFRA_ROOT="$ROOT" STS_INFRA_TARGETS_FILE="$(targets_path)" exec python3 -I "$ROOT/lib/infra_scenario.py" "$@"
       ;;

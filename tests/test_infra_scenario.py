@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for lib/infra_scenario.py (templates, new, explain analysis, status)."""
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -176,6 +178,11 @@ class NextAction(unittest.TestCase):
         command, _ = scenario.next_action("aws", "lab.tfvars", self.info(resources=0, stage=None))
         self.assertTrue(command.startswith("./infra plan aws"))
 
+    def test_ls_hides_destroyed_deployments_unless_asked(self):
+        live, destroyed = {"resources": 3}, {"resources": 0}
+        self.assertEqual(scenario.visible_deployments([live, destroyed], False), [live])
+        self.assertEqual(scenario.visible_deployments([live, destroyed], True), [live, destroyed])
+
 
 class NewEnvironment(unittest.TestCase):
     def test_new_with_target_drops_placeholder_ids(self):
@@ -191,14 +198,16 @@ class NewEnvironment(unittest.TestCase):
             original = scenario.ROOT, scenario.TARGETS_FILE
             scenario.ROOT, scenario.TARGETS_FILE = root, targets
             try:
-                self.assertEqual(scenario.main(["new", "aws", "my-lab", "--template", "lab", "--target", "lab-aws"]), 0)
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    self.assertEqual(scenario.main(["new", "aws", "my-lab", "--template", "lab", "--target", "lab-aws"]), 0)
                 created = (root / "environments" / "local" / "my-lab.tfvars").read_text()
-                with self.assertRaises(SystemExit):
+                with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
                     scenario.main(["new", "aws", "my-lab", "--template", "lab"])
             finally:
                 scenario.ROOT, scenario.TARGETS_FILE = original
         self.assertTrue(created.startswith('# Scenario: Test lab\ntarget = "lab-aws"\n'))
         self.assertNotIn(scenario.PLACEHOLDER_ID, created)
+        self.assertIn("Scenario: Test lab", printed.getvalue())
 
     def test_target_defaults_replace_auto_metastore_and_set_node_type(self):
         target = {"metastore": "shared-uc", "classic_node_type": "m5d.large"}

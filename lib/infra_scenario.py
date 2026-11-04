@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scenario helpers behind ./infra templates, new, explain, ls, and status.
+"""Scenario helpers behind ./infra list, templates, new, explain, ls, and status.
 
 Standard library only. ./infra runs this file with `python3 -I` and sets
 STS_INFRA_ROOT and STS_INFRA_TARGETS_FILE. Nothing here calls a cloud API:
@@ -99,6 +99,35 @@ def deployment_id_for(tfvars):
     return deployment_id
 
 
+# --- list (component catalog) -------------------------------------------------
+
+
+def command_list(args):
+    manifest = load_manifest()
+    if args.json:
+        print(json.dumps(manifest, indent=2))
+        return 0
+    for cloud in [args.cloud] if args.cloud else CLOUDS:
+        cloud_manifest = manifest["clouds"][cloud]
+        components = cloud_manifest["components"]
+        width = max(len(name) for name in components)
+        print(f"{cloud} components (cost, typical build time):")
+        for name, component in components.items():
+            derived = component.get("feature", "").startswith("derived.")
+            label = f"{name} (derived)" if derived else name
+            print(f"  {label:<{width + 10}} {component.get('cost', '-'):<7}{component.get('minutes', '-'):>3} min  {component.get('summary', '')}")
+        modes = cloud_manifest.get("connectivity_modes", {})
+        if modes:
+            print("  connectivity modes:")
+            mode_width = max(len(mode) for mode in modes)
+            for mode, description in modes.items():
+                print(f"    {mode:<{mode_width}}  {description}")
+        print()
+    print("Enable a component with features.<name> = true; derived components are added from the connectivity you choose.")
+    print("Ready-made scenarios: ./infra templates")
+    return 0
+
+
 # --- templates and new --------------------------------------------------------
 
 
@@ -196,6 +225,8 @@ def command_new(args):
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text("\n".join(lines).rstrip("\n") + "\n")
     print(f"Created {display(destination)} from {args.cloud}/{template.stem}.")
+    if lines and lines[0].startswith("# Scenario:"):
+        print(f"Scenario: {lines[0][len('# Scenario:'):].strip()}")
     if not args.target and PLACEHOLDER_ID in destination.read_text():
         print("Replace the placeholder account IDs, or add target = \"<name>\" (see ./infra targets).")
     print("Next:")
@@ -523,29 +554,44 @@ def all_deployments():
     return found
 
 
+def visible_deployments(deployments, show_all):
+    """Destroyed labs leave empty state behind; hide them unless asked."""
+    return deployments if show_all else [item for item in deployments if item["resources"]]
+
+
 def command_ls(args):
     deployments = all_deployments()
+    shown = visible_deployments(deployments, args.all)
+    hidden = len(deployments) - len(shown)
+    hidden_hint = f"{hidden} destroyed or empty deployment(s) hidden; ./infra ls --all shows them." if hidden else ""
     if args.json:
-        print(json.dumps({"version": 1, "deployments": deployments}, indent=2))
+        print(json.dumps({"version": 1, "deployments": shown, "hidden": hidden}, indent=2))
         return 0
-    if not deployments:
-        print("No local deployments.")
+    if not shown:
+        print("No local deployments hold cloud resources." if hidden else "No local deployments.")
+        if hidden_hint:
+            print(hidden_hint)
         return 0
     now = time.time()
-    width = max(len("DEPLOYMENT"), *(len(f"{item['cloud']}/{item['deployment_id']}") for item in deployments))
+    width = max(len("DEPLOYMENT"), *(len(f"{item['cloud']}/{item['deployment_id']}") for item in shown))
     print(f"{'DEPLOYMENT':<{width}}  {'RESOURCES':>9}  {'STAGE':<10} {'CHANGED':>7}  {'VERIFY':<14} TARGET")
-    for item in deployments:
-        verify = item["verify"]
+    for item in shown:
+        verify = item["verify"] if item["resources"] else None
         verify_text = f"{verify['status']} {age(now - verify['checked'])} ago" if verify else ("not run" if item["lab_check"] else "-")
         changed = age(now - item["state_changed"]) if item["state_changed"] else "-"
         print(f"{item['cloud'] + '/' + item['deployment_id']:<{width}}  {item['resources']:>9}  {item['stage'] or 'empty':<10} "
               f"{changed:>7}  {verify_text:<14} {item['target'] or '-'}")
-    live = [item for item in deployments if item["resources"]]
+    live = [item for item in shown if item["resources"]]
     if live:
         stale = [item for item in live if item["state_changed"] and now - item["state_changed"] > 7 * 86400]
         print(f"\n{len(live)} deployment(s) hold cloud resources that bill until destroyed.", end="")
         print(f" {len(stale)} unchanged for over 7 days." if stale else "")
+        for item in stale:
+            if item["tfvars"]:
+                print(f"  ./infra destroy-plan {item['cloud']} {item['tfvars']}")
         print("Destroy a finished lab with: ./infra destroy-plan <cloud> <tfvars>, then ./infra destroy ... --confirm destroy-<cloud>")
+    if hidden_hint:
+        print(hidden_hint)
     return 0
 
 
@@ -567,7 +613,7 @@ def next_action(cloud, tfvars, info):
     if apply_plan:
         return f"./infra plan {cloud} {shown}", f"the saved plan is {age(now - apply_plan['created'])} old; plan again and review it"
     if not info["resources"]:
-        return f"./infra plan {cloud} {shown}", "nothing is deployed yet (run ./infra doctor first if authentication is not set up)"
+        return f"./infra plan {cloud} {shown}", "nothing is deployed yet; run ./infra doctor first if authentication is not set up"
     if info["stage"] == "foundation":
         return f"./infra setup {cloud} {shown} --yes", "stage 1 is applied; log in to the new workspace, then plan stage 2"
     if info["lab_check"] and (
@@ -591,9 +637,9 @@ def command_status(args):
     print(f"  resources:  {info['resources']}" + (f" (stage {info['stage']})" if info["stage"] else ""))
     if info["workspace_url"]:
         print(f"  workspace:  {info['workspace_url']}")
-    if info["verify"]:
+    if info["verify"] and info["resources"]:
         print(f"  verify:     {info['verify']['status']} at {info['verify']['checked_at']}")
-    if info["pending_endpoints"]:
+    if info["pending_endpoints"] and info["resources"]:
         print(f"  endpoints:  {info['pending_endpoints']} recorded as pending at the last apply (./infra endpoints {args.cloud} status shows live state)")
     print(f"Next: {command}  ({reason})" if command else f"Next: nothing to do ({reason})")
     return 0
@@ -602,6 +648,10 @@ def command_status(args):
 def main(argv):
     parser = argparse.ArgumentParser(prog="./infra", add_help=False)
     commands = parser.add_subparsers(dest="command", required=True)
+
+    catalog = commands.add_parser("list")
+    catalog.add_argument("cloud", nargs="?", choices=CLOUDS)
+    catalog.add_argument("--json", action="store_true")
 
     templates = commands.add_parser("templates")
     templates.add_argument("cloud", nargs="?", choices=CLOUDS)
@@ -619,6 +669,7 @@ def main(argv):
     explain.add_argument("--json", action="store_true")
 
     ls = commands.add_parser("ls")
+    ls.add_argument("--all", action="store_true", help="include destroyed or empty deployments")
     ls.add_argument("--json", action="store_true")
 
     status = commands.add_parser("status")
@@ -632,6 +683,7 @@ def main(argv):
         print("Run ./infra without arguments for usage.", file=sys.stderr)
         return 2
     handlers = {
+        "list": command_list,
         "templates": command_templates,
         "new": command_new,
         "explain": command_explain,

@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./infra list)",
+      "Bash(./infra list*)",
       "Bash(./infra validate *)",
       "Bash(./infra doctor *)",
       "Bash(./infra output *)",
@@ -13,7 +13,9 @@
       "Bash(./infra ls*)",
       "Bash(./infra status *)",
       "Bash(./infra targets)",
-      "Bash(./infra targets --json)"
+      "Bash(./infra targets --json)",
+      "Bash(./infra new *)",
+      "Bash(./infra targets add *)"
     ],
     "ask": [
       "Bash(./infra setup *)",
@@ -28,8 +30,6 @@
       "Bash(./infra endpoints aws reject *)",
       "Bash(./infra endpoints azure approve *)",
       "Bash(./infra endpoints azure reject *)",
-      "Bash(./infra new *)",
-      "Bash(./infra targets add *)",
       "Bash(./infra targets remove *)",
       "Bash(./infra verify *)"
     ],

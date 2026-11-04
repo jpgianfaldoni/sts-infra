@@ -257,8 +257,9 @@ It exits `13` when a check fails, with the failing stage and a hint.
 exit code (`0` ready, `10` browser login needed, `11` wrong account, profile,
 or target, or an unpinned AWS account, `12` missing tool), which makes the
 workflow straightforward for coding agents. `./infra status <cloud> <tfvars>
---json` returns the next step for a deployment, and `./infra ls` lists every
-local deployment with its age. See
+--json` returns the next step for a deployment, and `./infra ls` lists the
+local deployments that still hold cloud resources, with their age (`--all`
+includes destroyed ones). See
 [authentication](guides/operations/authentication.md) for details, SSO profile
 creation, overrides, and automation.
 
@@ -319,14 +320,14 @@ checklist.
 - Local deployments use isolated state under
   `.state/<cloud>/<deployment-id>`.
 - `components.json` is the machine-readable catalog of components and supported
-  connectivity modes.
+  connectivity modes; `./infra list` prints it as a readable table.
 - `AGENTS.md` defines the guardrails for infrastructure agents, and
   `.claude/` holds the matching Claude Code permissions and the
   `deploy-scenario` skill.
 - `modules/` contains the reusable cloud components; `modules/shared` holds
   the ones both clouds use, such as the lab check job.
-- `lib/infra_scenario.py` implements `templates`, `new`, `explain`, `ls`, and
-  `status` (Python standard library only).
+- `lib/infra_scenario.py` implements `list`, `templates`, `new`, `explain`,
+  `ls`, and `status` (Python standard library only).
 - `guides/` contains networking explanations, tutorials, authentication, state,
   and deployment procedures.
 

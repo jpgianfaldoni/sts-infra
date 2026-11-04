@@ -150,8 +150,9 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
   traceback. Show the user the results, including the sample-data row counts.
 - `./infra status <cloud> <tfvars> --json` returns `next_action` for a
   deployment from local state, which is the way to resume work in a new
-  session. `./infra ls` lists every local deployment and how long it has
-  existed; remind the user to destroy labs they no longer need.
+  session. `./infra ls` lists the local deployments that still hold cloud
+  resources and how long they have existed (`--all` includes destroyed ones);
+  remind the user to destroy labs they no longer need.
 
 ## 5. Troubleshoot
 

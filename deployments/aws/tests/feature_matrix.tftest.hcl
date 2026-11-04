@@ -429,28 +429,6 @@ run "classic_peering_and_serverless_private_link" {
   }
 }
 
-run "classic_and_serverless_private_link" {
-  command = plan
-  variables {
-    databricks_account_id = "00000000-0000-0000-0000-000000000000"
-    features = {
-      workspace     = true
-      unity_catalog = false
-      rds_postgres  = true
-    }
-    connectivity = {
-      rds_postgres = {
-        classic    = "private_link"
-        serverless = "private_link"
-      }
-    }
-  }
-  assert {
-    condition     = output.connectivity.rds_postgres.classic.mode == "private_link" && output.connectivity.rds_postgres.serverless.mode == "private_link"
-    error_message = "Both compute types must use PrivateLink."
-  }
-}
-
 run "all_services_for_classic_and_serverless_private_link" {
   command = plan
   variables {
@@ -497,6 +475,16 @@ run "all_services_for_classic_and_serverless_private_link" {
       output.connectivity.kafka.serverless.mode == "private_link"
     ])
     error_message = "All five services must enable serverless PrivateLink."
+  }
+  assert {
+    condition = alltrue([
+      output.connectivity.rds_postgres.classic.mode == "private_link",
+      output.connectivity.rds_sql_server.classic.mode == "private_link",
+      output.connectivity.aurora_postgres.classic.mode == "private_link",
+      output.connectivity.rabbitmq.classic.mode == "private_link",
+      output.connectivity.kafka.classic.mode == "private_link"
+    ])
+    error_message = "All five services must enable classic PrivateLink."
   }
 }
 

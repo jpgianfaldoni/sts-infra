@@ -155,7 +155,7 @@ attaches storage as it needs it, so any node type works; set
 
 ```bash
 ./infra status aws environments/local/my-aws.tfvars --json   # next_action from local state
-./infra ls                                                   # every local deployment and its age
+./infra ls                                                   # deployments that hold cloud resources (--all adds destroyed ones)
 ```
 
 `status` reads only local state and artifacts. It suggests the next command:
