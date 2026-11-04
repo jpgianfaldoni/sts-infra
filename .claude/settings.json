@@ -31,7 +31,8 @@
       "Bash(./infra endpoints azure approve *)",
       "Bash(./infra endpoints azure reject *)",
       "Bash(./infra targets remove *)",
-      "Bash(./infra verify *)"
+      "Bash(./infra verify *)",
+      "Bash(./infra ui*)"
     ],
     "deny": [
       "Read(~/.aws/credentials)",

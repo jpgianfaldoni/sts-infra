@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>sts-infra</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>sts-infra</h1>
+  <nav>
+    <button data-view="environments" class="active">Environments</button>
+    <button data-view="new">New environment</button>
+    <button data-view="targets">Targets</button>
+  </nav>
+  <span id="notice" class="notice"></span>
+</header>
+
+<main>
+  <section id="view-environments" class="view">
+    <div class="split">
+      <aside id="environment-list" class="list"></aside>
+      <div id="environment-detail" class="detail"><p class="muted">Pick an environment, or create one.</p></div>
+    </div>
+  </section>
+
+  <section id="view-new" class="view hidden">
+    <form id="new-form" class="card">
+      <h2>Create an environment</h2>
+      <label>Cloud
+        <select name="cloud"><option value="aws">AWS</option><option value="azure">Azure</option></select>
+      </label>
+      <label>Template <select name="template"></select></label>
+      <p id="template-description" class="muted"></p>
+      <label>Name <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}" placeholder="my-lab"></label>
+      <label>Account target <select name="target"><option value="">(none: edit account IDs by hand)</option></select></label>
+      <button type="submit">Create</button>
+      <p class="muted">The template is copied to environments/local/&lt;name&gt;.tfvars; you then adjust it in a form.</p>
+    </form>
+  </section>
+
+  <section id="view-targets" class="view hidden">
+    <div class="split">
+      <div class="card" id="target-list"></div>
+      <form id="target-form" class="card">
+        <h2>Add a target</h2>
+        <p class="muted">Non-secret identifiers of an account you deploy into. Saved locally, never in Git.</p>
+        <label>Name <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"></label>
+        <label>Cloud <select name="cloud"><option value="aws">AWS</option><option value="azure">Azure</option></select></label>
+        <label>Description <input name="description"></label>
+        <div data-cloud="aws">
+          <label>AWS account ID <input name="aws_account_id" pattern="[0-9]{12}"></label>
+          <label>Databricks account ID <input name="databricks_account_id"></label>
+          <label>Region <input name="region" placeholder="us-west-2"></label>
+          <label>IAM Identity Center start URL <input name="sso_start_url" placeholder="https://org.awsapps.com/start"></label>
+          <label>IAM Identity Center region <input name="sso_region" placeholder="us-east-1"></label>
+          <label>Permission-set role name <input name="sso_role_name"></label>
+          <label>Unity Catalog metastore (shared accounts) <input name="metastore"></label>
+        </div>
+        <div data-cloud="azure" class="hidden">
+          <label>Subscription ID <input name="subscription_id"></label>
+          <label>Tenant ID <input name="tenant_id"></label>
+          <label>Databricks account ID <input name="databricks_account_id_azure"></label>
+          <label>Location <input name="location" placeholder="westus2"></label>
+        </div>
+        <label>Lab check node type <input name="classic_node_type" placeholder="optional"></label>
+        <button type="submit">Add target</button>
+      </form>
+    </div>
+  </section>
+</main>
+
+<template id="detail-template">
+  <div class="detail-head">
+    <h2><span class="env-name"></span> <small class="env-cloud"></small></h2>
+    <p class="env-scenario muted"></p>
+    <p class="env-state"></p>
+  </div>
+  <div class="columns">
+    <form class="card env-form">
+      <h3>Scenario</h3>
+      <label>Account target <select name="target"></select></label>
+      <label class="region-label">Region <input name="region"></label>
+      <h4>Components</h4>
+      <div class="features"></div>
+      <h4>Network paths from Databricks compute</h4>
+      <table class="connectivity"><thead><tr><th>Source</th><th>Classic compute</th><th>Serverless compute</th></tr></thead><tbody></tbody></table>
+      <label>Serverless endpoint approval
+        <select name="endpoint_approval"><option value="auto">automatic after apply</option><option value="manual">manual (practice the step)</option></select>
+      </label>
+      <div class="row">
+        <button type="submit">Save</button>
+        <button type="button" class="secondary act-explain">Save and explain</button>
+        <button type="button" class="secondary toggle-raw">Edit file text</button>
+      </div>
+      <details class="raw"><summary>File text</summary><textarea name="text" rows="18" spellcheck="false"></textarea>
+        <button type="button" class="secondary save-raw">Save text</button></details>
+      <pre class="explain-output output"></pre>
+    </form>
+
+    <div class="card actions">
+      <h3>Deploy</h3>
+      <ol class="steps">
+        <li><button type="button" class="act-doctor">Check authentication</button> <span class="doctor-result muted"></span>
+          <button type="button" class="secondary act-setup hidden">Log in (opens browser)</button></li>
+        <li><button type="button" class="act-plan">Plan</button> <span class="plan-result muted"></span></li>
+        <li><div class="plan-summary hidden"></div>
+          <label class="confirm-apply hidden"><input type="checkbox" class="apply-ack"> I reviewed the plan summary above</label>
+          <button type="button" class="act-apply" disabled>Apply</button></li>
+        <li><button type="button" class="act-verify">Verify network paths</button> <span class="verify-result muted"></span></li>
+      </ol>
+      <h3>Inspect</h3>
+      <div class="row">
+        <button type="button" class="secondary act-status">Status</button>
+        <button type="button" class="secondary act-output">Outputs</button>
+        <button type="button" class="secondary act-endpoints">Endpoints</button>
+      </div>
+      <h3>Destroy</h3>
+      <div class="row">
+        <button type="button" class="danger act-destroy-plan">Destroy plan</button>
+      </div>
+      <div class="destroy-summary hidden"></div>
+      <div class="confirm-destroy hidden">
+        <label>Type <code class="destroy-token"></code> to confirm <input class="destroy-input" autocomplete="off"></label>
+        <button type="button" class="danger act-destroy" disabled>Destroy</button>
+      </div>
+      <h3>Log</h3>
+      <p class="run-state muted"></p>
+      <pre class="log output"></pre>
+      <pre class="inspect-output output"></pre>
+    </div>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -43,7 +43,7 @@ def die(message, code=1):
 def display(path):
     path = Path(path)
     try:
-        return str(path.resolve().relative_to(ROOT))
+        return str(path.resolve().relative_to(ROOT.resolve()))
     except ValueError:
         return str(path)
 
@@ -273,7 +273,10 @@ def effective_config(cloud, tfvars, target):
         result = console()
     if result.returncode != 0:
         return None, ANSI.sub("", result.stderr or result.stdout).strip()
-    return json.loads(json.loads(result.stdout.strip())), None
+    try:
+        return json.loads(json.loads(result.stdout.strip())), None
+    except ValueError:
+        return None, "terraform console returned no configuration:\n" + ANSI.sub("", result.stderr or result.stdout).strip()
 
 
 def enabled(config, name):

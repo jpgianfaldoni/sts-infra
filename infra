@@ -41,6 +41,7 @@ Usage:
   ./infra explain <aws|azure> <environment.tfvars> [--json]
   ./infra ls [--all] [--json]
   ./infra status <aws|azure> <environment.tfvars> [--json]
+  ./infra ui [--port <port>] [--no-browser]
   ./infra targets [--json]
   ./infra targets add <name> --cloud <aws|azure> [target options]
   ./infra targets remove <name>
@@ -3030,6 +3031,12 @@ main() {
     list|templates|new|explain|ls|status)
       command -v python3 >/dev/null 2>&1 || die_code "$EXIT_MISSING_TOOL" "python3 is required for ./infra $command"
       STS_INFRA_ROOT="$ROOT" STS_INFRA_TARGETS_FILE="$(targets_path)" exec python3 -I "$ROOT/lib/infra_scenario.py" "$@"
+      ;;
+    ui)
+      # Local form-based UI: a 127.0.0.1-only web page that runs these same ./infra commands.
+      command -v python3 >/dev/null 2>&1 || die_code "$EXIT_MISSING_TOOL" "python3 is required for ./infra ui"
+      shift
+      STS_INFRA_ROOT="$ROOT" STS_INFRA_TARGETS_FILE="$(targets_path)" exec python3 -I "$ROOT/ui/server.py" "$@"
       ;;
     targets)
       shift

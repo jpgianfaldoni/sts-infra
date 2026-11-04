@@ -208,6 +208,20 @@ Available templates include:
 | `azure/workspace-private-storage-volume.tfvars` | Workspace and external volume backed by locked-down ADLS Gen2 storage, intentionally without a compute network path |
 | `azure/workspace-custom-dns.tfvars` | VNet-injected workspace whose VNet resolves names through a custom DNS server VM |
 
+### Or use the local web UI
+
+```bash
+./infra ui
+```
+
+`ui` starts a small form-based web page on `127.0.0.1` (Python standard
+library only, no agent) and opens it in your browser. It lists your
+environments, creates one from a template, lets you tick components and pick
+the network path per compute type, explains the result, and runs the same
+authentication check, login, plan, apply, verify, and destroy steps with the
+log streamed to the page. Apply is enabled only after you have reviewed the
+saved plan summary, and destroy still requires typing `destroy-<cloud>`.
+
 ## Deploy the scenario
 
 Terraform 1.11 or newer is required. Use `./infra` for validation, planning,
@@ -327,7 +341,8 @@ checklist.
 - `modules/` contains the reusable cloud components; `modules/shared` holds
   the ones both clouds use, such as the lab check job.
 - `lib/infra_scenario.py` implements `list`, `templates`, `new`, `explain`,
-  `ls`, and `status` (Python standard library only).
+  `ls`, and `status` (Python standard library only); `ui/` holds the local
+  web UI behind `./infra ui`.
 - `guides/` contains networking explanations, tutorials, authentication, state,
   and deployment procedures.
 
