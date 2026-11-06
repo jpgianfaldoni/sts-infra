@@ -377,7 +377,7 @@ jq -e --arg account "$ACCOUNT_ID" '
   .accounts["databricks/aws/" + $account].databricks_account_profile == "sts-aws-account-00000000" and
   .aws_sso == {session: "sts-infra", start_url: "https://example.awsapps.com/start", region: "us-east-1", role_name: "Admin"}
 ' "$AUTH_CONFIG" >/dev/null || { cat "$AUTH_CONFIG" >&2; fail "unexpected AWS auth mapping"; }
-CONFIG_MODE="$(stat -f '%Lp' "$AUTH_CONFIG" 2>/dev/null || stat -c '%a' "$AUTH_CONFIG")"
+CONFIG_MODE="$(stat -c '%a' "$AUTH_CONFIG" 2>/dev/null || stat -f '%Lp' "$AUTH_CONFIG")"
 [[ "$CONFIG_MODE" == "600" ]] || fail "authentication config mode is $CONFIG_MODE, expected 600"
 pass "AWS setup creates the SSO profile and logs in without prompts"
 
