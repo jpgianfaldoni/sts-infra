@@ -127,6 +127,11 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
 ./infra verify <cloud> <tfvars>    # loads the sample data and checks each path
 ```
 
+- Run each `./infra` command on its own from the repository root: no
+  `cd … &&`, pipes, `;`, or redirects. Permission rules in
+  `.claude/settings.json` match single commands, so compound commands prompt
+  for approval even when every part is allowed. Use background execution
+  instead of `> log 2>&1`; `./infra` already writes the Terraform log.
 - Plans and applies take 10–40 minutes. Run them in the background and tail
   the `Terraform log:` file that `./infra` prints.
 - **AWS deploys a new workspace in two stages.** The first plan reports
@@ -146,8 +151,19 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
   endpoint rules to become `ESTABLISHED`, runs the lab check job, and reports
   each path. Exit `0` means every path works; exit `13` means a check failed,
   with the failing stage (`dns`, `tcp`, `driver`, `credentials`, `login`,
-  `seed`, `query`) and a hint; unexpected errors also print the end of the
-  traceback. Show the user the results, including the sample-data row counts.
+  `seed`, `cdc`, `query`) and a hint; unexpected errors also print the end of
+  the traceback. Show the user the results, including the sample-data row
+  counts and each source's Lakeflow Connect line.
+- **Lakeflow Connect source setup** runs inside `verify` for every source with
+  `lakeflow_connect_enabled`: RDS SQL Server (CDC, on by default), Azure SQL
+  Database (change tracking, on by default; the Basic tier has no CDC), and RDS
+  PostgreSQL (logical replication, opt-in with `engine_version` 13 or newer).
+  The job creates a dedicated ingestion login, installs Databricks' utility
+  objects on SQL Server, and enables change capture on `customers` and
+  `orders`. It needs the same path the checks use. The Azure SQL Server VM is
+  prepared during apply through Azure VM Run Command instead, so it needs no
+  path. Ingestion logins are in Secrets Manager (`*-lakeflow-*`) or Key Vault
+  (`*-lakeflow-username`/`-password`).
 - `./infra status <cloud> <tfvars> --json` returns `next_action` for a
   deployment from local state, which is the way to resume work in a new
   session. `./infra ls` lists every local deployment and how long it has
@@ -166,6 +182,8 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
 | `verify` fails at `dns` or `tcp` on classic | The path is broken or deliberately absent; compare with `./infra explain`. |
 | `verify` fails at `driver` | "could not install": the compute has no outbound internet access to PyPI. "Unexpected error": the pinned driver set in `modules/shared/lab-check/notebooks/lab_check.py` is incompatible; the hint lists the installed versions, and `python3 tests/test_lab_check_drivers.py` reproduces it locally. |
 | `verify` fails at `login` or `credentials` | Rerun `verify` (it refreshes the credentials); on Azure, check the Key Vault-backed scope. |
+| `verify` fails at `cdc` | Read the hint. SQL Server: the utility script download needs outbound internet. PostgreSQL: `wal_level` must be `logical` (the Lakeflow parameter group applies after a reboot). The setup is idempotent: fix the cause and rerun `verify`. |
+| `apply` fails on `lakeflow_cdc_setup` (Azure SQL Server VM) | Read the `LAKEFLOW_CDC_SETUP_FAILED` line with `az vm run-command show --resource-group <rg> --vm-name <vm> --run-command-name lakeflow-cdc-setup --instance-view`, fix it, then plan and apply again. |
 | The classic check cluster cannot start | The region lacks capacity or quota for the default node type; set `lab_check.classic_node_type` (or `--classic-node-type` on the target). |
 | Destroy refuses to start on AWS | It needs the workspace login to terminate clusters: run `./infra setup aws <tfvars> --yes`. |
 

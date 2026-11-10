@@ -1,0 +1,242 @@
+# Prepares the SQL Server VM for Lakeflow Connect CDC from inside the VM.
+# Azure VM Run Command executes it through the VM agent, so no network path
+# from Databricks (or anywhere else) to SQL Server is needed for setup.
+param(
+    [Parameter(Mandatory = $true)][string]$SqlAdminUser,
+    [Parameter(Mandatory = $true)][string]$SqlAdminPassword,
+    [Parameter(Mandatory = $true)][string]$IngestionUser,
+    [Parameter(Mandatory = $true)][string]$IngestionPassword
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 3.0
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$DatabaseName = '${database_name}'
+$Tables = '${tables}'
+$UtilityScriptUrl = '${utility_script_url}'
+$SeedSql = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${seed_sql_base64}'))
+$Identifier = '^[A-Za-z][A-Za-z0-9_]{0,63}$'
+
+$script:SqlMessages = New-Object System.Collections.Generic.List[string]
+
+# Write-Host keeps progress out of function return values; Run Command
+# captures it as standard output.
+function Write-Step([string]$Message) {
+    Write-Host ("[{0:u}] {1}" -f (Get-Date).ToUniversalTime(), $Message)
+}
+
+trap {
+    Write-Host 'Recent SQL Server messages:'
+    $script:SqlMessages | Select-Object -Last 40 | ForEach-Object { Write-Host "  $_" }
+    Write-Host "LAKEFLOW_CDC_SETUP_FAILED $($_.Exception.Message)"
+    exit 1
+}
+
+foreach ($name in @($DatabaseName, $IngestionUser)) {
+    if ($name -notmatch $Identifier) { throw "Invalid SQL identifier '$name'." }
+}
+
+function New-SqlConnection([string]$Database, [string]$User, [string]$Password) {
+    $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+    $builder['Data Source'] = 'localhost'
+    $builder['Initial Catalog'] = $Database
+    $builder['User ID'] = $User
+    $builder['Password'] = $Password
+    $builder['Encrypt'] = $false
+    $builder['Connect Timeout'] = 30
+    $connection = New-Object System.Data.SqlClient.SqlConnection($builder.ConnectionString)
+    $connection.add_InfoMessage({ param($source, $info) foreach ($line in ($info.Message -split "`n")) { if ($line.Trim()) { $script:SqlMessages.Add($line.TrimEnd()) } } })
+    $connection.Open()
+    return $connection
+}
+
+# Runs one batch and returns the first result set as objects.
+function Invoke-Sql {
+    param(
+        [string]$Database,
+        [string]$Sql,
+        [hashtable]$Parameters = @{},
+        [string]$User = $SqlAdminUser,
+        [string]$Password = $SqlAdminPassword
+    )
+    $connection = New-SqlConnection $Database $User $Password
+    try {
+        $command = $connection.CreateCommand()
+        $command.CommandText = $Sql
+        $command.CommandTimeout = 900
+        foreach ($key in $Parameters.Keys) {
+            [void]$command.Parameters.AddWithValue("@$key", [string]$Parameters[$key])
+        }
+        $table = New-Object System.Data.DataTable
+        $reader = $command.ExecuteReader()
+        try { $table.Load($reader) } finally { $reader.Close() }
+        return , $table
+    } finally {
+        $connection.Close()
+    }
+}
+
+# Splits a script on lines that contain only GO, as sqlcmd does, and runs the
+# batches on one connection so USE statements carry over between them.
+function Invoke-SqlScript([string]$Database, [string]$Script) {
+    $connection = New-SqlConnection $Database $SqlAdminUser $SqlAdminPassword
+    try {
+        foreach ($batch in ($Script -split '(?im)^\s*GO\s*$')) {
+            if (-not $batch.Trim()) { continue }
+            $command = $connection.CreateCommand()
+            $command.CommandText = $batch
+            $command.CommandTimeout = 900
+            [void]$command.ExecuteNonQuery()
+        }
+    } finally {
+        $connection.Close()
+    }
+}
+
+Write-Step 'Starting SQL Server Agent (CDC capture and cleanup jobs run on it).'
+Set-Service -Name SQLSERVERAGENT -StartupType Automatic
+Start-Service -Name SQLSERVERAGENT
+(Get-Service -Name SQLSERVERAGENT).WaitForStatus('Running', [TimeSpan]::FromMinutes(5))
+
+Write-Step 'Waiting for SQL Server to accept the administrator login.'
+$deadline = (Get-Date).AddMinutes(15)
+while ($true) {
+    try { (New-SqlConnection 'master' $SqlAdminUser $SqlAdminPassword).Close(); break }
+    catch {
+        if ((Get-Date) -gt $deadline) { throw "SQL Server did not accept the administrator login: $($_.Exception.Message)" }
+        Start-Sleep -Seconds 15
+    }
+}
+
+Write-Step "Loading the sample data into [$DatabaseName]."
+Invoke-SqlScript 'master' $SeedSql
+
+# An earlier version of this script ran each seed batch on its own connection,
+# which created the sample tables in master. Remove those copies.
+[void](Invoke-Sql -Database 'master' -Sql @'
+IF OBJECT_ID(N'dbo.orders', N'U') IS NOT NULL AND OBJECT_ID(N'dbo.FK_orders_customers', N'F') IS NOT NULL
+    DROP TABLE dbo.orders;
+IF OBJECT_ID(N'dbo.customers', N'U') IS NOT NULL AND OBJECT_ID(N'dbo.UQ_customers_email', N'UQ') IS NOT NULL
+    DROP TABLE dbo.customers;
+'@)
+
+Write-Step "Creating or updating the ingestion login [$IngestionUser]."
+[void](Invoke-Sql -Database 'master' -Parameters @{ user = $IngestionUser; password = $IngestionPassword; db = $DatabaseName } -Sql @'
+DECLARE @sql NVARCHAR(MAX);
+IF SUSER_ID(@user) IS NULL
+    SET @sql = N'CREATE LOGIN ' + QUOTENAME(@user) + N' WITH PASSWORD = ' + QUOTENAME(@password, '''') + N', CHECK_POLICY = ON, DEFAULT_DATABASE = ' + QUOTENAME(@db) + N';';
+ELSE
+    SET @sql = N'ALTER LOGIN ' + QUOTENAME(@user) + N' WITH PASSWORD = ' + QUOTENAME(@password, '''') + N';';
+EXEC (@sql);
+'@)
+
+# Privileges from "Microsoft SQL Server database user requirements" (non-Azure
+# databases) in the Lakeflow Connect documentation.
+Write-Step 'Granting the master database privileges Lakeflow Connect needs.'
+[void](Invoke-Sql -Database 'master' -Parameters @{ user = $IngestionUser } -Sql @'
+DECLARE @u NVARCHAR(130) = QUOTENAME(@user);
+DECLARE @sql NVARCHAR(MAX) = N'';
+IF USER_ID(@user) IS NULL
+    SET @sql += N'CREATE USER ' + @u + N' FOR LOGIN ' + @u + N';';
+SET @sql += N'GRANT VIEW ANY DATABASE TO ' + @u + N';';
+SELECT @sql += N'GRANT SELECT ON OBJECT::sys.' + name + N' TO ' + @u + N';'
+FROM (VALUES (N'databases'), (N'schemas'), (N'tables'), (N'columns'), (N'key_constraints'), (N'foreign_keys'),
+             (N'check_constraints'), (N'default_constraints'), (N'change_tracking_tables'),
+             (N'change_tracking_databases'), (N'objects'), (N'views'), (N'triggers')) AS v(name);
+SELECT @sql += N'GRANT EXECUTE ON OBJECT::sys.' + name + N' TO ' + @u + N';'
+FROM (VALUES (N'sp_tables'), (N'sp_columns_100'), (N'sp_pkeys'), (N'sp_statistics_100')) AS v(name);
+EXEC (@sql);
+'@)
+
+Write-Step "Granting the [$DatabaseName] database privileges Lakeflow Connect needs."
+[void](Invoke-Sql -Database $DatabaseName -Parameters @{ user = $IngestionUser } -Sql @'
+DECLARE @u NVARCHAR(130) = QUOTENAME(@user);
+DECLARE @sql NVARCHAR(MAX) = N'';
+IF USER_ID(@user) IS NULL
+    SET @sql += N'CREATE USER ' + @u + N' FOR LOGIN ' + @u + N';';
+SET @sql += N'GRANT VIEW DATABASE PERFORMANCE STATE TO ' + @u + N';';
+SET @sql += N'GRANT SELECT ON SCHEMA::dbo TO ' + @u + N';';
+SELECT @sql += N'GRANT SELECT ON OBJECT::sys.' + name + N' TO ' + @u + N';'
+FROM (VALUES (N'indexes'), (N'index_columns'), (N'columns'), (N'tables'),
+             (N'fulltext_index_columns'), (N'fulltext_indexes')) AS v(name);
+EXEC (@sql);
+'@)
+
+Write-Step "Downloading the Lakeflow Connect utility objects script from $UtilityScriptUrl."
+$utilityFile = Join-Path $env:TEMP 'lakeflow_utility_script.sql'
+Invoke-WebRequest -Uri $UtilityScriptUrl -OutFile $utilityFile -UseBasicParsing
+$utilityScript = [IO.File]::ReadAllText($utilityFile, [Text.Encoding]::UTF8)
+if ($utilityScript -notmatch 'lakeflowSetupChangeDataCapture') { throw "The downloaded file is not the Lakeflow Connect utility objects script." }
+
+Write-Step "Installing the utility objects in [$DatabaseName]."
+Invoke-SqlScript $DatabaseName $utilityScript
+
+Write-Step "Enabling CDC on $Tables for [$IngestionUser]."
+[void](Invoke-Sql -Database $DatabaseName -Parameters @{ user = $IngestionUser; tables = $Tables } -Sql @'
+EXEC dbo.lakeflowSetupChangeDataCapture @Tables = @tables, @User = @user;
+EXEC dbo.lakeflowFixPermissions @User = @user, @Tables = @tables;
+'@)
+
+Write-Step 'Checking that the capture job records a change.'
+# Change one value and change it back: the capture job records both updates
+# and the sample data ends unchanged.
+[void](Invoke-Sql -Database $DatabaseName -Sql @'
+UPDATE dbo.orders SET status = N'shipped' WHERE order_id = 1001;
+UPDATE dbo.orders SET status = N'paid' WHERE order_id = 1001;
+'@)
+$deadline = (Get-Date).AddMinutes(5)
+while ($true) {
+    $captured = (Invoke-Sql -Database $DatabaseName -Sql @'
+DECLARE @rows BIGINT = 0, @sql NVARCHAR(MAX) = N'SELECT @rows = 0';
+SELECT @sql += N' + (SELECT COUNT_BIG(*) FROM cdc.' + QUOTENAME(capture_instance + N'_CT') + N')'
+FROM cdc.change_tables WHERE capture_instance LIKE N'lakeflow[_]%';
+EXEC sp_executesql @sql, N'@rows BIGINT OUTPUT', @rows OUTPUT;
+SELECT @rows AS captured_rows;
+'@).Rows[0].captured_rows
+    if ($captured -gt 0) { break }
+    if ((Get-Date) -gt $deadline) { throw 'CDC is enabled but the capture job recorded no changes within 5 minutes; check that SQL Server Agent is running.' }
+    Start-Sleep -Seconds 10
+}
+
+Write-Step 'Verifying the setup as the ingestion login.'
+$asIngestion = (Invoke-Sql -Database $DatabaseName -User $IngestionUser -Password $IngestionPassword -Sql @'
+SELECT (SELECT COUNT(*) FROM dbo.customers) AS customers,
+       (SELECT COUNT(*) FROM dbo.orders) AS orders,
+       CONVERT(VARCHAR(30), sys.fn_cdc_get_max_lsn(), 1) AS max_lsn;
+'@).Rows[0]
+$state = (Invoke-Sql -Database $DatabaseName -Sql @'
+SELECT
+    (SELECT is_cdc_enabled FROM sys.databases WHERE database_id = DB_ID()) AS cdc_enabled,
+    dbo.lakeflowUtilityVersion() AS utility_version,
+    dbo.lakeflowDetectPlatform() AS platform,
+    (SELECT STRING_AGG(OBJECT_SCHEMA_NAME(source_object_id) + N'.' + OBJECT_NAME(source_object_id) + N'=' + capture_instance, N',')
+       FROM cdc.change_tables) AS capture_instances,
+    (SELECT COUNT(*) FROM msdb.dbo.cdc_jobs WHERE database_id = DB_ID()) AS cdc_jobs,
+    CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(32)) AS product_version,
+    CAST(SERVERPROPERTY('Edition') AS NVARCHAR(64)) AS edition;
+'@).Rows[0]
+
+if ([int]$state.cdc_enabled -ne 1) { throw "CDC is not enabled on [$DatabaseName]." }
+foreach ($table in ($Tables -split ',')) {
+    if ([string]$state.capture_instances -notmatch [regex]::Escape($table.Trim()) + '=lakeflow_') {
+        throw "Table $table has no Lakeflow capture instance (found: $($state.capture_instances))."
+    }
+}
+if ([int]$state.cdc_jobs -lt 2) { throw 'The CDC capture and cleanup jobs are missing.' }
+
+$result = [ordered]@{
+    status            = 'ready'
+    database          = $DatabaseName
+    tables            = $Tables
+    ingestion_user    = $IngestionUser
+    capture_instances = [string]$state.capture_instances
+    cdc_jobs          = [int]$state.cdc_jobs
+    captured_rows     = [long]$captured
+    utility_version   = [string]$state.utility_version
+    platform          = [string]$state.platform
+    sql_server        = "$($state.edition) $($state.product_version)"
+    sample_rows       = [ordered]@{ customers = [int]$asIngestion.customers; orders = [int]$asIngestion.orders }
+}
+Write-Host ('LAKEFLOW_CDC_SETUP_RESULT ' + ($result | ConvertTo-Json -Compress))
+exit 0

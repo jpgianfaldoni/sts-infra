@@ -95,3 +95,17 @@ resource "azurerm_private_endpoint" "sql" {
     private_dns_zone_ids = [azurerm_private_dns_zone.sql.id]
   }
 }
+
+# Lakeflow Connect ingestion login. The Basic tier supports change tracking but
+# not CDC, so the lab check job enables change tracking, which Databricks
+# recommends for tables with primary keys.
+resource "random_password" "lakeflow" {
+  count            = var.lakeflow_connect_enabled ? 1 : 0
+  length           = 24
+  special          = true
+  override_special = "!#$%&*()-_=+"
+  min_lower        = 1
+  min_upper        = 1
+  min_numeric      = 1
+  min_special      = 1
+}

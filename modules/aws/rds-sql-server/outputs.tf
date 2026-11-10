@@ -32,3 +32,7 @@ output "seed_file" {
   description = "Idempotent sample-data script that the lab check job runs; it creates the demo database first."
   value       = "${path.module}/assets/seed.sql"
 }
+output "lakeflow_secret_arn" {
+  description = "Secrets Manager secret with the Lakeflow Connect ingestion login, or null."
+  value       = try(aws_secretsmanager_secret.lakeflow[0].arn, null)
+}

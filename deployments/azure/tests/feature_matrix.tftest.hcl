@@ -676,8 +676,8 @@ run "key_vault_backed_secret_scope_with_workspace" {
   }
 
   assert {
-    condition     = length(output.key_vault.secret_names) == 6
-    error_message = "SQL Database and SQL Server VM credentials must all be stored."
+    condition     = length(output.key_vault.secret_names) == 10
+    error_message = "SQL Database and SQL Server VM credentials, including both Lakeflow Connect logins, must all be stored."
   }
 }
 
@@ -958,4 +958,113 @@ run "reject_unknown_azure_endpoint_approval" {
   }
 
   expect_failures = [var.endpoint_approval]
+}
+
+run "sql_server_vm_lakeflow_cdc_without_network_path" {
+  command = plan
+
+  variables {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      lakeflow_connect_enabled = true
+    }
+  }
+
+  assert {
+    condition     = contains(output.key_vault.secret_names, "sql-server-vm-lakeflow-password") && length(output.key_vault.secret_names) == 6
+    error_message = "The Lakeflow ingestion login must be stored in Key Vault next to the VM credentials."
+  }
+
+  assert {
+    condition     = module.sql_server_vm[0].lakeflow_username == "lakeflow" && module.sql_server_vm[0].lakeflow_cdc.database == "demo"
+    error_message = "The SQL Server VM output must describe the Lakeflow CDC source."
+  }
+
+  assert {
+    condition     = length(module.sql_database_workspace_peering) == 0 && length(local.serverless_private_endpoint_rules) == 0
+    error_message = "Lakeflow CDC setup must not create any network path to the SQL Server VM."
+  }
+}
+
+run "sql_server_vm_private_hostname" {
+  command = plan
+
+  variables {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = false
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      private_dns_name = "sqlserver.lab.internal"
+    }
+  }
+
+  assert {
+    condition     = module.sql_server_vm[0].private_dns_zone.name == "lab.internal"
+    error_message = "The hostname's zone must be everything after its first label."
+  }
+
+  assert {
+    condition     = length(module.sql_database_workspace_peering) == 0
+    error_message = "A private hostname must not add a network path."
+  }
+}
+
+run "lab_check_enables_change_tracking_on_azure_sql" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      sql_database = true
+    }
+    connectivity = {
+      sql_database = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition     = output.lab_check.checks.sql_database_serverless.cdc == "sqlserver_ct"
+    error_message = "Azure SQL Database (Basic tier) must be prepared for Lakeflow Connect with change tracking."
+  }
+
+  assert {
+    condition     = contains(output.key_vault.secret_names, "sql-database-lakeflow-password")
+    error_message = "The Azure SQL ingestion login must be in the Key Vault-backed scope the job reads."
+  }
+}
+
+run "lab_check_azure_sql_lakeflow_can_be_disabled" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      sql_database = true
+    }
+    sql_database = {
+      lakeflow_connect_enabled = false
+    }
+    connectivity = {
+      sql_database = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition     = output.lab_check.checks.sql_database_serverless.cdc == null && !contains(output.key_vault.secret_names, "sql-database-lakeflow-password")
+    error_message = "Disabling Lakeflow Connect must skip the source setup and its login."
+  }
 }

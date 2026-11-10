@@ -48,7 +48,7 @@ data "databricks_node_type" "smallest" {
 # the serverless task runs after the classic one so seeding never races.
 resource "databricks_job" "this" {
   name                = "${var.name_prefix}-lab-check"
-  description         = "Created by sts-infra. Loads the sample data and checks each configured network path; run it with ./infra verify."
+  description         = "Created by sts-infra. Loads the sample data, prepares Lakeflow Connect sources for change capture, and checks each configured network path; run it with ./infra verify."
   max_concurrent_runs = 1
   timeout_seconds     = 3600
 
@@ -108,12 +108,15 @@ resource "databricks_job" "this" {
           host    = task.value.host
           port    = tostring(task.value.port)
           # coalesce() rejects all-empty arguments, so try() supplies "".
-          database      = try(coalesce(task.value.database), "")
-          seed_database = try(coalesce(task.value.seed_database, task.value.database), "")
-          seed_path     = try("/Workspace${databricks_workspace_file.seed[task.value.source].path}", "")
-          secret_scope  = try(coalesce(task.value.secret_scope), "")
-          username_key  = try(coalesce(task.value.username_key), "")
-          password_key  = try(coalesce(task.value.password_key), "")
+          database         = try(coalesce(task.value.database), "")
+          seed_database    = try(coalesce(task.value.seed_database, task.value.database), "")
+          seed_path        = try("/Workspace${databricks_workspace_file.seed[task.value.source].path}", "")
+          secret_scope     = try(coalesce(task.value.secret_scope), "")
+          username_key     = try(coalesce(task.value.username_key), "")
+          password_key     = try(coalesce(task.value.password_key), "")
+          cdc_method       = try(coalesce(task.value.cdc_method), "")
+          cdc_username_key = try(coalesce(task.value.cdc_username_key), "")
+          cdc_password_key = try(coalesce(task.value.cdc_password_key), "")
         }
       }
     }

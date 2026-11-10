@@ -11,6 +11,7 @@ ROOT="$TEST_DIR/root"
 mkdir -p "$ROOT/deployments/aws" "$ROOT/deployments/azure" "$ROOT/modules/aws" "$ROOT/modules/azure" \
   "$ROOT/environments/local" "$TEST_DIR/bin" "$TEST_DIR/state"
 cp "$REPO/infra" "$REPO/components.json" "$ROOT/"
+cp -R "$REPO/lib" "$ROOT/lib"
 cp "$REPO/deployments/aws/providers.tf" "$ROOT/deployments/aws/"
 cp "$REPO/deployments/azure/providers.tf" "$ROOT/deployments/azure/"
 INFRA="$ROOT/infra"

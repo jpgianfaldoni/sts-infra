@@ -18,6 +18,8 @@ locals {
         secret_scope = local.lab_check_sql_scope
         username_key = "sql-database-admin-username"
         password_key = "sql-database-admin-password"
+        # Lakeflow Connect source setup; the ingestion login lives in Key Vault.
+        cdc_method = local.lab_check_sql_scope != null && local.sql_database_lakeflow && local.key_vault_enabled ? "sqlserver_ct" : null
       }
     } : {},
   )
@@ -26,19 +28,22 @@ locals {
     for source, config in local.lab_check_sources : [
       for compute in ["classic", "serverless"] : {
         "${source}_${compute}" = {
-          source        = source
-          path          = compute
-          mode          = config[compute]
-          engine        = config.engine
-          host          = config.host
-          port          = config.port
-          database      = config.engine == "tcp" ? null : config.database
-          seed_database = config.engine == "tcp" ? null : config.database
-          seed_file     = config.seed_file
-          secret_scope  = config.engine == "tcp" ? null : config.secret_scope
-          username_key  = config.engine == "tcp" ? null : config.username_key
-          password_key  = config.engine == "tcp" ? null : config.password_key
-          run_after     = compute == "serverless" && config.classic != "none" ? "${source}_classic" : null
+          source           = source
+          path             = compute
+          mode             = config[compute]
+          engine           = config.engine
+          host             = config.host
+          port             = config.port
+          database         = config.engine == "tcp" ? null : config.database
+          seed_database    = config.engine == "tcp" ? null : config.database
+          seed_file        = config.seed_file
+          secret_scope     = config.engine == "tcp" ? null : config.secret_scope
+          username_key     = config.engine == "tcp" ? null : config.username_key
+          password_key     = config.engine == "tcp" ? null : config.password_key
+          run_after        = compute == "serverless" && config.classic != "none" ? "${source}_classic" : null
+          cdc_method       = config.cdc_method
+          cdc_username_key = config.cdc_method == null ? null : "${source}-lakeflow-username"
+          cdc_password_key = config.cdc_method == null ? null : "${source}-lakeflow-password"
         }
       } if config[compute] != "none"
     ]

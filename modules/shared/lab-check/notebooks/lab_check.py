@@ -6,7 +6,10 @@
 # MAGIC compute path (classic or serverless) to one data source:
 # MAGIC
 # MAGIC 1. resolves the source host and opens a TCP connection over the private path;
-# MAGIC 2. for databases, loads the sample data idempotently and counts the rows.
+# MAGIC 2. for databases, loads the sample data idempotently and counts the rows;
+# MAGIC 3. when the source is configured for Lakeflow Connect, prepares it for
+# MAGIC    change capture (CDC or change tracking on SQL Server, logical
+# MAGIC    replication on PostgreSQL) and checks the ingestion user's access.
 # MAGIC
 # MAGIC Credentials come from a Databricks secret scope and are never printed.
 
@@ -38,6 +41,9 @@ PARAMETERS = (
     "secret_scope",
     "username_key",
     "password_key",
+    "cdc_method",
+    "cdc_username_key",
+    "cdc_password_key",
 )
 for name in PARAMETERS:
     dbutils.widgets.text(name, "")
@@ -64,6 +70,12 @@ DRIVERS = {
 }
 TCP_TIMEOUT_SECONDS = 15
 SAMPLE_TABLES = ("customers", "orders")
+# Databricks' SQL Server utility objects script for Lakeflow Connect source setup.
+LAKEFLOW_UTILITY_SCRIPT_URL = "https://learn.microsoft.com/en-us/azure/databricks/_extras/documents/utility_script.sql"
+CDC_METHODS = ("sqlserver_cdc", "sqlserver_ct", "postgresql_logical")
+POSTGRES_PUBLICATION = "databricks_publication"
+POSTGRES_SLOT = "databricks_slot"
+IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
 
 # The step in progress, reported when an unexpected error interrupts it.
 stage = "dns"
@@ -193,18 +205,52 @@ def load_driver():
     return driver
 
 
-def credentials():
+def credentials(username_key=None, password_key=None):
     enter("credentials")
+    username_key = username_key or params["username_key"]
+    password_key = password_key or params["password_key"]
     try:
-        username = dbutils.secrets.get(scope=params["secret_scope"], key=params["username_key"])
-        password = dbutils.secrets.get(scope=params["secret_scope"], key=params["password_key"])
+        username = dbutils.secrets.get(scope=params["secret_scope"], key=username_key)
+        password = dbutils.secrets.get(scope=params["secret_scope"], key=password_key)
     except Exception as error:  # noqa: BLE001 - surface any secret lookup failure
         fail(
             "credentials",
-            f"could not read {params['username_key']}/{params['password_key']} from secret scope {params['secret_scope']} ({type(error).__name__}).",
+            f"could not read {username_key}/{password_key} from secret scope {params['secret_scope']} ({type(error).__name__}).",
             f"./infra verify {cloud} <tfvars> copies the credentials into the scope before it runs this job.",
         )
     return username, password
+
+
+def cdc_credentials():
+    username, password = credentials(params["cdc_username_key"], params["cdc_password_key"])
+    if not IDENTIFIER.match(username):
+        fail("cdc", f"the ingestion user name {username!r} is not a simple identifier.", "Use letters, digits, and underscores.")
+    return username, password
+
+
+def cdc_hint():
+    return (
+        "The Lakeflow Connect source setup runs after the sample data loads and is safe to rerun; "
+        "rerun ./infra verify after fixing the cause."
+    )
+
+
+def download_utility_script():
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(LAKEFLOW_UTILITY_SCRIPT_URL, timeout=60) as response:
+            script = response.read().decode("utf-8-sig")
+    except Exception as error:  # noqa: BLE001 - report any download failure
+        fail(
+            "cdc",
+            f"could not download the Lakeflow Connect utility objects script ({error}).",
+            "The setup downloads it from learn.microsoft.com, so this compute needs outbound internet access.",
+        )
+    match = re.search(r"Version\s+([0-9]+(?:\.[0-9]+)*)", script)
+    if "lakeflowSetupChangeDataCapture" not in script or not match:
+        fail("cdc", "the downloaded file is not the Lakeflow Connect utility objects script.", cdc_hint())
+    return script, match.group(1)
 
 
 def login_hint():
@@ -257,14 +303,15 @@ def check_postgresql():
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
 
-    def connect(database):
+    def connect(database, user=None, secret=None):
         enter("login")
+        login = user or username
         try:
             return pg.Connection(
-                username, host=host, port=port, database=database, password=password, ssl_context=context, timeout=60
+                login, host=host, port=port, database=database, password=secret or password, ssl_context=context, timeout=60
             )
         except (pg.DatabaseError, pg.InterfaceError) as error:
-            fail("login", f"PostgreSQL rejected the connection ({error}).", login_hint())
+            fail("login", f"PostgreSQL rejected the connection for {login} ({error}).", login_hint())
 
     seed = read_seed()
     if seed is not None:
@@ -284,18 +331,21 @@ def check_postgresql():
     else:
         result["rows"] = {table: connection.run(f"SELECT count(*) FROM public.{table}")[0][0] for table in SAMPLE_TABLES}
     connection.close()
+    if seed is not None and params["cdc_method"] == "postgresql_logical":
+        setup_postgresql_logical(connect)
 
 
 def check_sqlserver():
     mssql = load_driver()
     username, password = credentials()
 
-    def connect(database):
+    def connect(database, user=None, secret=None):
         enter("login")
-        users = [username]
+        login, secret = user or username, secret or password
+        users = [login]
         # Azure SQL Database also accepts the user@server form some drivers need.
-        if host.endswith(".database.windows.net") and "@" not in username:
-            users.append(f"{username}@{host.split('.')[0]}")
+        if host.endswith(".database.windows.net") and "@" not in login:
+            users.append(f"{login}@{host.split('.')[0]}")
         error = None
         for user in users:
             try:
@@ -303,7 +353,7 @@ def check_sqlserver():
                     server=host,
                     port=port,
                     user=user,
-                    password=password,
+                    password=secret,
                     database=database,
                     login_timeout=30,
                     timeout=120,
@@ -311,7 +361,7 @@ def check_sqlserver():
                 )
             except mssql.Error as caught:
                 error = caught
-        fail("login", f"SQL Server rejected the connection ({error}).", login_hint())
+        fail("login", f"SQL Server rejected the connection for {login} ({error}).", login_hint())
 
     seed = read_seed()
     if seed is not None:
@@ -340,11 +390,246 @@ def check_sqlserver():
                 rows[table] = cursor.fetchone()[0]
             result["rows"] = rows
     connection.close()
+    if seed is not None and params["cdc_method"] in ("sqlserver_cdc", "sqlserver_ct"):
+        setup_sqlserver_change_capture(connect)
+
+
+
+# Lakeflow Connect source setup. It follows "Prepare SQL Server for ingestion
+# using the utility objects script" and the PostgreSQL source setup in the
+# Lakeflow Connect documentation, and is idempotent so every verify reruns it.
+
+SQLSERVER_MASTER_GRANTS = [
+    f"SELECT ON OBJECT::sys.{name}"
+    for name in (
+        "databases", "schemas", "tables", "columns", "key_constraints", "foreign_keys", "check_constraints",
+        "default_constraints", "change_tracking_tables", "change_tracking_databases", "objects", "views", "triggers",
+    )
+] + [f"EXECUTE ON OBJECT::sys.{name}" for name in ("sp_tables", "sp_columns_100", "sp_pkeys", "sp_statistics_100")]
+SQLSERVER_DATABASE_GRANTS = [
+    f"SELECT ON OBJECT::sys.{name}"
+    for name in ("indexes", "index_columns", "columns", "tables", "fulltext_index_columns", "fulltext_indexes")
+] + ["SELECT ON SCHEMA::dbo"]
+SQLSERVER_SET_LOGIN = """
+DECLARE @sql NVARCHAR(MAX);
+IF SUSER_ID(%s) IS NULL
+    SET @sql = N'CREATE LOGIN ' + QUOTENAME(%s) + N' WITH PASSWORD = ' + QUOTENAME(%s, '''') + N';';
+ELSE
+    SET @sql = N'ALTER LOGIN ' + QUOTENAME(%s) + N' WITH PASSWORD = ' + QUOTENAME(%s, '''') + N';';
+EXEC (@sql);
+"""
+
+
+def sql_scalar(cursor, statement, parameters=None):
+    cursor.execute(statement, parameters)
+    row = cursor.fetchone()
+    while cursor.nextset():
+        pass
+    return None if row is None else row[0]
+
+
+def sql_run(cursor, statement, parameters=None):
+    cursor.execute(statement, parameters)
+    while cursor.nextset():
+        pass
+
+
+def setup_sqlserver_change_capture(connect):
+    method = params["cdc_method"]
+    database = params["database"]
+    tables = ",".join(f"dbo.{table}" for table in SAMPLE_TABLES)
+    user, secret = cdc_credentials()
+    quoted = f"[{user}]"
+    enter("cdc")
+    try:
+        master = connect("master")
+        enter("cdc")
+        with master.cursor() as cursor:
+            # EngineEdition 5 is Azure SQL Database; rdsadmin exists only on RDS.
+            if sql_scalar(cursor, "SELECT CAST(SERVERPROPERTY('EngineEdition') AS INT)") == 5:
+                platform = "azure_sql_database"
+            elif sql_scalar(cursor, "SELECT DB_ID(N'rdsadmin')") is not None:
+                platform = "rds"
+            else:
+                platform = "sql_server"
+            sql_run(cursor, SQLSERVER_SET_LOGIN, (user, user, secret, user, secret))
+            if platform == "azure_sql_database":
+                sql_run(cursor, f"IF USER_ID(%s) IS NULL CREATE USER {quoted} FOR LOGIN {quoted};", (user,))
+                sql_run(cursor, f"ALTER SERVER ROLE ##MS_DatabaseConnector## ADD MEMBER {quoted};")
+            elif platform == "sql_server":
+                # RDS grants these through the public role and has no master users.
+                sql_run(cursor, f"IF USER_ID(%s) IS NULL CREATE USER {quoted} FOR LOGIN {quoted};", (user,))
+                sql_run(cursor, f"GRANT VIEW ANY DATABASE TO {quoted};")
+                for grant in SQLSERVER_MASTER_GRANTS:
+                    sql_run(cursor, f"GRANT {grant} TO {quoted};")
+        master.close()
+
+        connection = connect(database)
+        enter("cdc")
+        with connection.cursor() as cursor:
+            sql_run(cursor, f"IF USER_ID(%s) IS NULL CREATE USER {quoted} FOR LOGIN {quoted};", (user,))
+            sql_run(cursor, f"GRANT VIEW DATABASE STATE TO {quoted};")
+            for grant in SQLSERVER_DATABASE_GRANTS:
+                sql_run(cursor, f"GRANT {grant} TO {quoted};")
+
+            installed = sql_scalar(
+                cursor,
+                "SELECT CASE WHEN OBJECT_ID(N'dbo.lakeflowUtilityVersion') IS NULL THEN NULL ELSE dbo.lakeflowUtilityVersion() END",
+            )
+            script, version = download_utility_script()
+            # Reinstall only for a new version: an upgrade briefly swaps the DDL
+            # objects a running gateway depends on.
+            if installed != version:
+                sql_run(cursor, script)
+                print(f"Installed Lakeflow Connect utility objects {version} (was {installed or 'not installed'}).")
+
+            if method == "sqlserver_cdc":
+                sql_run(cursor, "EXEC dbo.lakeflowSetupChangeDataCapture @Tables = %s, @User = %s;", (tables, user))
+            else:
+                sql_run(cursor, "EXEC dbo.lakeflowSetupChangeTracking @Tables = %s, @User = %s, @Retention = '2 DAYS';", (tables, user))
+            sql_run(cursor, "EXEC dbo.lakeflowFixPermissions @User = %s, @Tables = %s;", (user, tables))
+
+            if method == "sqlserver_cdc":
+                if sql_scalar(cursor, "SELECT is_cdc_enabled FROM sys.databases WHERE database_id = DB_ID()") != 1:
+                    fail("cdc", f"CDC is not enabled on database {database}.", cdc_hint())
+                cursor.execute(
+                    "SELECT OBJECT_NAME(source_object_id), capture_instance FROM cdc.change_tables "
+                    "WHERE capture_instance LIKE N'lakeflow[_]%'"
+                )
+                instances = dict(cursor.fetchall())
+                missing = [table for table in SAMPLE_TABLES if table not in instances]
+                if missing:
+                    fail("cdc", f"no Lakeflow capture instance on {', '.join(missing)}.", cdc_hint())
+                tracked = sorted(instances.values())
+            else:
+                cursor.execute("SELECT OBJECT_NAME(object_id) FROM sys.change_tracking_tables")
+                tracked = sorted({row[0] for row in cursor.fetchall()} & set(SAMPLE_TABLES))
+                if len(tracked) != len(SAMPLE_TABLES):
+                    fail("cdc", f"change tracking is not enabled on every sample table (found {tracked}).", cdc_hint())
+            utility_version = sql_scalar(cursor, "SELECT dbo.lakeflowUtilityVersion()")
+        connection.close()
+
+        # The ingestion user must be able to sign in and read the tables.
+        ingestion = connect(database, user, secret)
+        enter("cdc")
+        with ingestion.cursor() as cursor:
+            for table in SAMPLE_TABLES:
+                sql_scalar(cursor, f"SELECT COUNT(*) FROM dbo.{table}")
+        ingestion.close()
+    except LabCheckFailed:
+        raise
+    except Exception as error:  # noqa: BLE001 - report the SQL Server error with the stage
+        fail("cdc", f"{type(error).__name__}: {error}", cdc_hint())
+
+    result["cdc"] = {
+        "status": "ready",
+        "method": "cdc" if method == "sqlserver_cdc" else "change_tracking",
+        "platform": platform,
+        "database": database,
+        "tables": [f"dbo.{table}" for table in SAMPLE_TABLES],
+        "tracked": tracked,
+        "ingestion_user": user,
+        "utility_version": utility_version,
+    }
+    print(f"Lakeflow Connect source ready: {result['cdc']['method']} on {', '.join(result['cdc']['tables'])} for {user}.")
+
+
+def setup_postgresql_logical(connect):
+    database = params["database"]
+    user, secret = cdc_credentials()
+    tables = [f"public.{table}" for table in SAMPLE_TABLES]
+    enter("cdc")
+    try:
+        connection = connect(database)
+        enter("cdc")
+        wal_level = connection.run("SHOW wal_level")[0][0]
+        if wal_level != "logical":
+            fail(
+                "cdc",
+                f"wal_level is {wal_level}, not logical.",
+                "Logical replication comes from the Lakeflow parameter group (rds.logical_replication = 1) "
+                "and applies after the instance reboots.",
+            )
+
+        def run_formatted(template, *values):
+            # format() quotes identifiers (%I) and literals (%L) server-side.
+            placeholders = ", ".join(f":v{i}::text" for i in range(len(values)))
+            statement = connection.run(
+                f"SELECT format(:template::text, {placeholders})", template=template, **{f"v{i}": v for i, v in enumerate(values)}
+            )[0][0]
+            connection.run(statement)
+
+        exists = connection.run("SELECT 1 FROM pg_roles WHERE rolname = :u", u=user)
+        run_formatted("ALTER ROLE %I WITH LOGIN PASSWORD %L" if exists else "CREATE ROLE %I WITH LOGIN PASSWORD %L", user, secret)
+        if connection.run("SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication'"):
+            run_formatted("GRANT rds_replication TO %I", user)
+            platform = "rds"
+        else:
+            run_formatted("ALTER ROLE %I WITH REPLICATION", user)
+            platform = "postgresql"
+        run_formatted("GRANT CONNECT ON DATABASE %I TO %I", database, user)
+        run_formatted("GRANT USAGE ON SCHEMA public TO %I", user)
+        for table in SAMPLE_TABLES:
+            run_formatted("GRANT SELECT ON TABLE public.%I TO %I", table, user)
+            # The sample tables have primary keys and no large columns.
+            run_formatted("ALTER TABLE public.%I REPLICA IDENTITY DEFAULT", table)
+
+        # The publication comes before the slot; the table owner creates it.
+        if not connection.run("SELECT 1 FROM pg_publication WHERE pubname = :p", p=POSTGRES_PUBLICATION):
+            connection.run(f"CREATE PUBLICATION {POSTGRES_PUBLICATION} FOR TABLE {', '.join(tables)}")
+        published_query = "SELECT schemaname || '.' || tablename FROM pg_publication_tables WHERE pubname = :p"
+        published = {row[0] for row in connection.run(published_query, p=POSTGRES_PUBLICATION)}
+        for table in tables:
+            if table not in published:
+                connection.run(f"ALTER PUBLICATION {POSTGRES_PUBLICATION} ADD TABLE {table}")
+
+        # The replication user must own the slot. Since PostgreSQL 16 a role's
+        # creator is not a member by default, so grant membership for SET ROLE.
+        if not connection.run("SELECT 1 FROM pg_replication_slots WHERE slot_name = :s", s=POSTGRES_SLOT):
+            run_formatted("GRANT %I TO CURRENT_USER", user)
+            run_formatted("SET ROLE %I", user)
+            connection.run("SELECT pg_create_logical_replication_slot(:s::name, 'pgoutput')", s=POSTGRES_SLOT)
+            connection.run("RESET ROLE")
+        slot = connection.run("SELECT plugin, database FROM pg_replication_slots WHERE slot_name = :s", s=POSTGRES_SLOT)
+        if not slot or slot[0][0] != "pgoutput" or slot[0][1] != database:
+            found = f"plugin {slot[0][0]} on database {slot[0][1]}" if slot else "no slot"
+            fail(
+                "cdc",
+                f"replication slot {POSTGRES_SLOT} must be a pgoutput slot on {database} (found {found}).",
+                "Slot names are unique per server: drop or rename the other slot, then rerun ./infra verify.",
+            )
+        published = sorted(row[0] for row in connection.run(published_query, p=POSTGRES_PUBLICATION))
+        connection.close()
+
+        ingestion = connect(database, user, secret)
+        enter("cdc")
+        for table in tables:
+            ingestion.run(f"SELECT count(*) FROM {table}")
+        ingestion.close()
+    except LabCheckFailed:
+        raise
+    except Exception as error:  # noqa: BLE001 - report the PostgreSQL error with the stage
+        fail("cdc", f"{type(error).__name__}: {error}", cdc_hint())
+
+    result["cdc"] = {
+        "status": "ready",
+        "method": "logical_replication",
+        "platform": platform,
+        "database": database,
+        "tables": tables,
+        "tracked": published,
+        "ingestion_user": user,
+        "publication": POSTGRES_PUBLICATION,
+        "replication_slot": POSTGRES_SLOT,
+    }
+    print(f"Lakeflow Connect source ready: publication {POSTGRES_PUBLICATION} and slot {POSTGRES_SLOT} for {user}.")
 
 
 # COMMAND ----------
 
 try:
+    if params["cdc_method"] and params["cdc_method"] not in CDC_METHODS:
+        fail("cdc", f"unknown cdc_method {params['cdc_method']!r}.", f"Use one of {', '.join(CDC_METHODS)}.")
     check_network()
     if engine == "postgresql":
         check_postgresql()

@@ -168,7 +168,7 @@
               "path": "rds_postgres.lakeflow_connect_enabled",
               "type": "bool",
               "default": false,
-              "description": "Enable PostgreSQL logical-replication parameters and create a write-only Secrets Manager credential for Lakeflow Connect source setup."
+              "description": "Enable logical replication (parameter group) and store a replication login in Secrets Manager; ./infra verify's lab check job then creates the login, the databricks_publication publication, and the databricks_slot replication slot. Requires engine_version 13 or newer."
             }
           },
           "minutes": 15,
@@ -198,7 +198,15 @@
           },
           "minutes": 35,
           "cost": "high",
-          "cost_note": "SQL Server Standard license-included instance bills hourly"
+          "cost_note": "SQL Server Standard license-included instance bills hourly",
+          "options": {
+            "lakeflow_connect_enabled": {
+              "path": "rds_sql_server.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Store a lakeflow ingestion login in Secrets Manager; ./infra verify's lab check job creates it, installs the Lakeflow Connect utility objects, and enables CDC on the sample tables. Needs a classic or serverless path."
+            }
+          }
         },
         "aurora_postgres": {
           "summary": "Private Aurora PostgreSQL cluster with writer and reader endpoints in its own VPC",
@@ -635,6 +643,12 @@
               "type": "bool",
               "default": true,
               "description": "Expose the Key Vault to the workspace as a Key Vault-backed secret scope (requires the workspace)."
+            },
+            "lakeflow_connect_enabled": {
+              "path": "sql_database.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Store a lakeflow ingestion login in Key Vault; ./infra verify's lab check job creates it, installs the Lakeflow Connect utility objects, and enables change tracking on the sample tables (the Basic tier does not support CDC). Needs a path and the Key Vault-backed scope."
             }
           },
           "minutes": 10,
@@ -643,10 +657,30 @@
           "classic_path_option": "workspace_peering_enabled"
         },
         "sql_server_vm": {
-          "summary": "Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise",
+          "summary": "Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise; prepared for Lakeflow Connect CDC from inside the VM, with sample tables",
           "module": "sql-server-vm",
           "feature": "features.sql_server_vm",
           "dependencies": [],
+          "options": {
+            "lakeflow_connect_enabled": {
+              "path": "sql_server_vm.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Through Azure VM Run Command (no network path needed), load the sample tables into the demo database, start SQL Server Agent, create a dedicated ingestion login, install the Lakeflow Connect utility objects, and enable CDC on dbo.customers and dbo.orders."
+            },
+            "lakeflow_username": {
+              "path": "sql_server_vm.lakeflow_username",
+              "type": "string",
+              "default": "lakeflow",
+              "description": "SQL login for Lakeflow Connect ingestion; its password is stored in Key Vault as sql-server-vm-lakeflow-password."
+            },
+            "private_dns_name": {
+              "path": "sql_server_vm.private_dns_name",
+              "type": "string",
+              "default": null,
+              "description": "Private hostname for SQL Server, such as sqlserver.lab.internal, for a Unity Catalog connection to use. A private DNS zone linked only to the SQL VNet resolves it to the VM; it adds no network path."
+            }
+          },
           "minutes": 20,
           "cost": "high",
           "cost_note": "SQL Server VM license bills hourly"

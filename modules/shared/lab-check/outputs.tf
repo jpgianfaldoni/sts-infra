@@ -25,6 +25,7 @@ output "checks" {
       host      = check.host
       port      = check.port
       seeded    = check.seed_file != null
+      cdc       = check.cdc_method
       run_after = check.run_after
     }
   }

@@ -78,6 +78,112 @@ class TfvarsParsing(unittest.TestCase):
         self.assertEqual(scenario.string_value(values["region"]), "us-east-1")
         self.assertNotIn("workspace", values)
 
+    def test_settings_read_nested_inline_null_and_first_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lab.tfvars"
+            path.write_text(
+                'region = "us-east-1" // comment\n'
+                'aws_profile = null\n'
+                'name_prefix = "it\'s # not a comment"\n'
+                'region = "ignored"\n'
+                'features = {\n  workspace = true # flag\n  unity_catalog = false\n}\n'
+                'lab_check = { enabled = false, classic_node_type = "m5.large" }\n'
+                'zones = ["a", "b"]\n'
+                'unity_catalog = {\n  metastore_mode = "auto"\n}\n'
+            )
+            settings = scenario.tfvars_settings(path)
+            self.assertEqual(scenario.tfvar_value(path, "region"), "us-east-1")
+            self.assertEqual(scenario.tfvar_value(path, "aws_profile"), "")
+            self.assertEqual(scenario.tfvar_value(path, "name_prefix"), "it's # not a comment")
+            self.assertEqual(scenario.tfvar_value(path, "workspace"), "")
+            self.assertEqual(scenario.tfvar_value(path, "workspace", "features"), "true")
+            self.assertEqual(scenario.tfvar_value(path, "unity_catalog", "features"), "false")
+            self.assertEqual(scenario.tfvar_value(path, "enabled", "lab_check"), "false")
+            self.assertEqual(scenario.tfvar_value(path, "classic_node_type", "lab_check"), "m5.large")
+            self.assertEqual(scenario.tfvar_value(path, "metastore_mode", "unity_catalog"), "auto")
+            self.assertEqual(settings[(None, "zones")], "")
+            self.assertEqual(settings[(None, "features")], "")
+            self.assertNotIn(("zones", "a"), settings)
+
+
+class Targets(unittest.TestCase):
+    def run_with_targets(self, argv, targets):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "config" / "targets.json"
+            if targets is not None:
+                file.parent.mkdir()
+                file.write_text(json.dumps(targets))
+            original = scenario.TARGETS_FILE
+            scenario.TARGETS_FILE = file
+            try:
+                code = scenario.main(argv)
+                return code, json.loads(file.read_text()) if file.exists() else None
+            finally:
+                scenario.TARGETS_FILE = original
+
+    def test_add_list_and_remove(self):
+        aws = ["targets", "add", "lab-aws", "--cloud", "aws", "--aws-account-id", "123456789012",
+               "--databricks-account-id", ACCOUNT, "--sso-start-url", "https://x/start", "--sso-region", "us-east-1",
+               "--sso-role-name", "Admin", "--metastore", "shared"]
+        code, saved = self.run_with_targets(aws, None)
+        self.assertEqual(code, 0)
+        self.assertEqual(saved["targets"]["lab-aws"], {
+            "cloud": "aws", "aws_account_id": "123456789012", "databricks_account_id": ACCOUNT, "metastore": "shared",
+            "aws_sso": {"start_url": "https://x/start", "region": "us-east-1", "role_name": "Admin"},
+        })
+        code, saved = self.run_with_targets(["targets", "remove", "lab-aws"], saved)
+        self.assertEqual((code, saved["targets"]), (0, {}))
+
+    def test_add_rejects_bad_input(self):
+        base = ["targets", "add", "x", "--cloud"]
+        for argv in (
+            base + ["aws", "--aws-account-id", "12345", "--databricks-account-id", ACCOUNT],
+            base + ["aws", "--aws-account-id", "123456789012"],
+            base + ["aws", "--aws-account-id", "123456789012", "--databricks-account-id", ACCOUNT, "--sso-region", "us-east-1"],
+            base + ["azure", "--subscription-id", ACCOUNT, "--metastore", "shared"],
+            base + ["gcp", "--subscription-id", ACCOUNT],
+            ["targets", "add", "bad name", "--cloud", "azure", "--subscription-id", ACCOUNT],
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                self.run_with_targets(argv, None)
+            self.assertEqual(raised.exception.code, 2, argv)
+
+    def test_invalid_file_is_rejected(self):
+        for data in (
+            {"version": 2, "targets": {}},
+            {"version": 1, "targets": {"t": {"cloud": "aws", "aws_account_id": "1", "password": "no"}}},
+            {"version": 1, "targets": {"t": {"cloud": "azure", "subscription_id": ""}}},
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                self.run_with_targets(["targets", "--json"], data)
+            self.assertEqual(raised.exception.code, 1, data)
+
+    def test_target_value_and_settings_output(self):
+        target = {"cloud": "aws", "aws_account_id": "123456789012", "databricks_account_id": ACCOUNT,
+                  "aws_sso": {"start_url": "https://x/start", "region": "us-east-1", "role_name": "Admin"}}
+        self.assertEqual(scenario.target_value(target, "aws_sso.start_url"), "https://x/start")
+        self.assertEqual(scenario.target_value(target, "aws_sso"), "")
+        self.assertEqual(scenario.target_value(target, "missing.deep"), "")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tfvars = root / "lab.tfvars"
+            tfvars.write_text('target = "lab-aws"\nname_prefix = "it\'s"\nfeatures = {\n  workspace = true\n}\n')
+            (root / "targets.json").write_text(json.dumps({"version": 1, "targets": {"lab-aws": target}}))
+            original = scenario.TARGETS_FILE
+            scenario.TARGETS_FILE = root / "targets.json"
+            try:
+                import io, contextlib
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(scenario.main(["settings", str(tfvars)]), 0)
+            finally:
+                scenario.TARGETS_FILE = original
+        lines = out.getvalue().splitlines()
+        self.assertIn("ENV_SETTING__name_prefix='it'\"'\"'s'", lines)
+        self.assertIn("ENV_SETTING__features__workspace=true", lines)
+        self.assertIn("ENV_TARGET_FIELD__aws_sso__role_name=Admin", lines)
+        self.assertIn("ENV_TARGET_FIELD__aws_account_id=123456789012", lines)
+
 
 class Analysis(unittest.TestCase):
     def test_aws_classic_postgres_over_peering(self):
@@ -87,7 +193,7 @@ class Analysis(unittest.TestCase):
         self.assertEqual(names[:3], ["workspace", "unity_catalog", "rds_postgres"])
         self.assertIn("lab_check", names)
         self.assertNotIn("ncc", names)
-        self.assertEqual(report["checks"], [{"source": "rds_postgres", "compute": "classic", "mode": "peering", "sample_data": True}])
+        self.assertEqual(report["checks"], [{"source": "rds_postgres", "compute": "classic", "mode": "peering", "sample_data": True, "lakeflow_setup": None}])
         self.assertEqual(report["stages"], 2)
         self.assertIsNone(report["endpoint_approval"])
         self.assertEqual(levels(report, "error"), [])
@@ -130,7 +236,7 @@ class Analysis(unittest.TestCase):
         self.assertIn("ncc", names)
         self.assertIn("key_vault", names)
         self.assertNotIn("vnet_peering", names)
-        self.assertEqual(report["checks"], [{"source": "sql_database", "compute": "serverless", "mode": "private_link", "sample_data": True}])
+        self.assertEqual(report["checks"], [{"source": "sql_database", "compute": "serverless", "mode": "private_link", "sample_data": True, "lakeflow_setup": "change tracking"}])
         self.assertEqual(report["stages"], 1)
 
     def test_azure_classic_path_is_the_peering_option(self):
