@@ -94,6 +94,7 @@ module "rds_sql_server" {
   name_prefix                    = "${local.name_prefix}-sqlserver"
   region                         = var.region
   vpc_cidr                       = var.database_networks.rds_sql_server
+  lakeflow_connect_enabled       = var.rds_sql_server.lakeflow_connect_enabled
   enable_classic_private_link    = var.connectivity.rds_sql_server.classic == "private_link"
   enable_serverless_private_link = var.connectivity.rds_sql_server.serverless == "private_link"
   deletion_protection            = !var.allow_destructive_demo_cleanup

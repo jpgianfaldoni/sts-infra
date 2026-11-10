@@ -139,3 +139,35 @@ resource "aws_vpc_endpoint_service_allowed_principal" "serverless" {
   vpc_endpoint_service_id = aws_vpc_endpoint_service.this[0].id
   principal_arn           = "arn:${data.aws_partition.current.partition}:iam::565502421330:role/private-connectivity-role-${var.region}"
 }
+
+# Lakeflow Connect ingestion login. The password is ephemeral and the secret
+# write-only, so neither is stored in Terraform state; ./infra verify copies it
+# into the lab check scope and the job creates the login and enables CDC.
+ephemeral "random_password" "lakeflow" {
+  count = var.lakeflow_connect_enabled ? 1 : 0
+
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+"
+  min_lower        = 1
+  min_upper        = 1
+  min_numeric      = 1
+  min_special      = 1
+}
+resource "aws_secretsmanager_secret" "lakeflow" {
+  count = var.lakeflow_connect_enabled ? 1 : 0
+
+  name_prefix             = "${local.name}-lakeflow-"
+  recovery_window_in_days = 7
+  tags                    = var.tags
+}
+resource "aws_secretsmanager_secret_version" "lakeflow" {
+  count = var.lakeflow_connect_enabled ? 1 : 0
+
+  secret_id = aws_secretsmanager_secret.lakeflow[0].id
+  secret_string_wo = jsonencode({
+    username = "lakeflow"
+    password = ephemeral.random_password.lakeflow[0].result
+  })
+  secret_string_wo_version = 1
+}

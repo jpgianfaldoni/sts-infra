@@ -195,6 +195,15 @@ variable "glue_federation" {
     error_message = "Glue federation Databricks connectivity requires the glue_federation, workspace, and unity_catalog features."
   }
 }
+variable "rds_sql_server" {
+  description = "RDS SQL Server Lakeflow Connect source configuration."
+  type = object({
+    # The lab check job creates a lakeflow ingestion login and enables CDC on
+    # the sample tables, so Lakeflow Connect can ingest them.
+    lakeflow_connect_enabled = optional(bool, true)
+  })
+  default = {}
+}
 variable "rds_postgres" {
   description = "RDS PostgreSQL engine and Lakeflow Connect source configuration."
   type = object({

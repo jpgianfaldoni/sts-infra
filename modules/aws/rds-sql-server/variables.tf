@@ -40,3 +40,8 @@ variable "tags" {
   default = {
   }
 }
+variable "lakeflow_connect_enabled" {
+  description = "Create a write-only Secrets Manager credential for the Lakeflow Connect ingestion login; the lab check job creates the login and enables CDC."
+  type        = bool
+  default     = true
+}

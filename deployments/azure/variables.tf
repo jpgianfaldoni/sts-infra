@@ -239,6 +239,9 @@ variable "sql_database" {
     # Make the deploying principal the server's Microsoft Entra administrator.
     # SQL authentication stays enabled.
     entra_admin_enabled = optional(bool, true)
+    # The lab check job creates a lakeflow ingestion login and enables change
+    # tracking on the sample tables (the Basic tier does not support CDC).
+    lakeflow_connect_enabled = optional(bool, true)
   })
   default = {}
 
@@ -306,6 +309,15 @@ variable "existing_network_connectivity_config_id" {
     condition     = var.existing_network_connectivity_config_id == null || trimspace(var.existing_network_connectivity_config_id) != ""
     error_message = "existing_network_connectivity_config_id must be null or a non-empty NCC ID."
   }
+}
+variable "sql_server_vm" {
+  description = "SQL Server VM options. lakeflow_connect_enabled prepares the demo database for Lakeflow Connect CDC from inside the VM, without any network path to it."
+  type = object({
+    lakeflow_connect_enabled = optional(bool, true)
+    lakeflow_username        = optional(string, "lakeflow")
+    private_dns_name         = optional(string)
+  })
+  default = {}
 }
 variable "sql_vm_network" {
   type = object({ vnet_address_space = list(string)

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Scenario helpers behind ./infra templates, new, explain, ls, and status.
+"""Scenario helpers behind ./infra templates, new, explain, ls, status, and targets.
 
 Standard library only. ./infra runs this file with `python3 -I` and sets
-STS_INFRA_ROOT and STS_INFRA_TARGETS_FILE. Nothing here calls a cloud API:
+STS_INFRA_ROOT and STS_INFRA_TARGETS_FILE. It also owns tfvars parsing and
+the targets file: the internal `settings`, `tfvar`, and `target` commands are
+how ./infra reads environment settings. Nothing here calls a cloud API:
 explain evaluates the environment file with `terraform console`, and ls and
 status read local state and saved artifacts.
 """
@@ -10,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -32,6 +35,12 @@ TARGET_TERRAFORM_FIELDS = {
 }
 # Sources whose lab check loads sample data; the others only connect.
 SEEDED_SOURCES = {"aws": {"rds_postgres", "rds_sql_server"}, "azure": {"sql_database"}}
+# Sources the lab check job prepares for Lakeflow Connect: (option default,
+# change capture method). Defaults match deployments/<cloud>/variables.tf.
+LAKEFLOW_SOURCES = {
+    "aws": {"rds_postgres": (False, "logical replication"), "rds_sql_server": (True, "CDC")},
+    "azure": {"sql_database": (True, "change tracking")},
+}
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -52,36 +61,234 @@ def load_manifest():
     return json.loads((ROOT / "components.json").read_text())
 
 
-def load_targets():
+# --- named account targets ----------------------------------------------------
+# A target holds the non-secret identifiers of an account many environments
+# deploy into. The file is {"version": 1, "targets": {name: {...}}}.
+
+TARGET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+TARGET_FIELDS = {
+    "aws": {"cloud", "description", "aws_account_id", "databricks_account_id", "region", "aws_profile",
+            "databricks_account_profile", "aws_sso", "metastore", "classic_node_type"},
+    "azure": {"cloud", "description", "subscription_id", "tenant_id", "databricks_account_id", "location",
+              "databricks_account_profile", "classic_node_type"},
+}
+SSO_FIELDS = {"start_url", "region", "role_name"}
+UUID = re.compile(r"^[0-9a-fA-F-]{36}$")
+
+
+def nonempty_strings(mapping):
+    return all(isinstance(value, str) and value for value in mapping.values())
+
+
+def valid_targets(data):
+    if not (isinstance(data, dict) and data.get("version") == 1 and set(data) <= {"version", "targets"}):
+        return False
+    targets = data.get("targets")
+    if not isinstance(targets, dict):
+        return False
+    for name, target in targets.items():
+        if not (TARGET_NAME.match(name) and isinstance(target, dict) and target.get("cloud") in CLOUDS):
+            return False
+        if not set(target) <= TARGET_FIELDS[target["cloud"]]:
+            return False
+        sso = target.get("aws_sso", {})
+        if not nonempty_strings({k: v for k, v in target.items() if k != "aws_sso"}):
+            return False
+        if not (isinstance(sso, dict) and set(sso) <= SSO_FIELDS and nonempty_strings(sso)):
+            return False
+    return True
+
+
+def load_targets_file():
     if not TARGETS_FILE.is_file():
-        return {}
-    return json.loads(TARGETS_FILE.read_text()).get("targets", {})
+        return {"version": 1, "targets": {}}
+    try:
+        data = json.loads(TARGETS_FILE.read_text())
+    except ValueError:
+        data = None
+    if not valid_targets(data):
+        die(f"invalid targets file: {TARGETS_FILE}")
+    return data
+
+
+def load_targets():
+    return load_targets_file()["targets"]
+
+
+def write_targets_file(data):
+    """Replace the targets file atomically, readable by the owner only."""
+    if not valid_targets(data):
+        die(f"refusing to write an invalid targets file: {TARGETS_FILE}")
+    TARGETS_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = TARGETS_FILE.with_name(f".{TARGETS_FILE.name}.tmp.{os.getpid()}")
+    try:
+        with open(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.replace(temp, TARGETS_FILE)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def target_value(target, field):
+    """A field of a target by dotted path (for example aws_sso.start_url), or ''."""
+    value = target
+    for part in field.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def command_target(args):
+    """Internal: `target <name>` exits 1 when undefined; `target <name> <field>` prints the field."""
+    target = load_targets().get(args.name)
+    if args.field is None:
+        return 0 if target is not None else 1
+    if target is not None and (value := target_value(target, args.field)):
+        print(value)
+    return 0
+
+
+def command_targets(args):
+    if args.action == "add":
+        return targets_add(args)
+    if args.action == "remove":
+        return targets_remove(args)
+    data = load_targets_file()
+    if args.json:
+        print(json.dumps({"version": 1, "path": str(TARGETS_FILE), "targets": data["targets"]}, indent=2))
+        return 0
+    if not data["targets"]:
+        print(f"No targets defined in {TARGETS_FILE}.")
+        print("Add one with: ./infra targets add <name> --cloud aws --aws-account-id <id> --databricks-account-id <uuid> [--region <region>]")
+        print("          or: ./infra targets add <name> --cloud azure --subscription-id <id> [--databricks-account-id <uuid>] [--location <location>]")
+        return 0
+    print(f"Targets ({TARGETS_FILE}):")
+    for name, target in data["targets"].items():
+        if target["cloud"] == "aws":
+            account = f"aws {target.get('aws_account_id', '?')}"
+        else:
+            account = f"subscription {target.get('subscription_id', '?')}"
+        databricks = f"databricks {target.get('databricks_account_id', '-')}"
+        region = target.get("region") or target.get("location") or "-"
+        print(f"  {name:<22} {target['cloud']:<6} {account:<34} {databricks:<49} {region:<14} {target.get('description', '')}")
+    return 0
+
+
+# `targets add` option -> target field (dotted paths land in the aws_sso object).
+TARGET_OPTIONS = {
+    "description": "description",
+    "aws_account_id": "aws_account_id",
+    "databricks_account_id": "databricks_account_id",
+    "region": "region",
+    "aws_profile": "aws_profile",
+    "databricks_profile": "databricks_account_profile",
+    "sso_start_url": "aws_sso.start_url",
+    "sso_region": "aws_sso.region",
+    "sso_role_name": "aws_sso.role_name",
+    "subscription_id": "subscription_id",
+    "tenant_id": "tenant_id",
+    "location": "location",
+    "metastore": "metastore",
+    "classic_node_type": "classic_node_type",
+}
+
+
+def targets_add(args):
+    if not TARGET_NAME.match(args.name):
+        die("target names must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}", 2)
+    if args.cloud not in CLOUDS:
+        die("targets add requires --cloud aws or --cloud azure", 2)
+    if args.aws_account_id is not None and not re.fullmatch(r"[0-9]{12}", args.aws_account_id):
+        die("--aws-account-id must be 12 digits", 2)
+    for option in ("databricks_account_id", "subscription_id", "tenant_id"):
+        value = getattr(args, option)
+        if value is not None and not UUID.match(value):
+            die(f"--{option.replace('_', '-')} must be a UUID", 2)
+    entry = {"cloud": args.cloud}
+    for option, field in TARGET_OPTIONS.items():
+        value = getattr(args, option)
+        if value is None:
+            continue
+        if value == "":
+            die(f"--{option.replace('_', '-')} requires a value", 2)
+        parent, _, leaf = field.rpartition(".")
+        (entry.setdefault(parent, {}) if parent else entry)[leaf] = value
+    if args.cloud == "aws":
+        if not {"aws_account_id", "databricks_account_id"} <= set(entry):
+            die("AWS targets need --aws-account-id and --databricks-account-id", 2)
+        if len(entry.get("aws_sso", {})) not in (0, 3):
+            die("pass all of --sso-start-url, --sso-region, and --sso-role-name, or none of them", 2)
+    else:
+        if "subscription_id" not in entry:
+            die("Azure targets need --subscription-id", 2)
+        if "metastore" in entry:
+            die("--metastore applies to AWS targets only", 2)
+    data = load_targets_file()
+    verb = "Updated" if args.name in data["targets"] else "Added"
+    data["targets"][args.name] = entry
+    write_targets_file(data)
+    print(f"{verb} target '{args.name}' in {TARGETS_FILE}.")
+    print(f'Use it from an environment file with: target = "{args.name}"')
+    return 0
+
+
+def targets_remove(args):
+    data = load_targets_file()
+    if args.name not in data["targets"]:
+        die(f"target '{args.name}' is not defined in {TARGETS_FILE}")
+    del data["targets"][args.name]
+    write_targets_file(data)
+    print(f"Removed target '{args.name}' from {TARGETS_FILE}.")
+    return 0
 
 
 # --- tfvars helpers -----------------------------------------------------------
 
 
+def scan_line(line):
+    """Return (code, depth change) for one tfvars line.
+
+    Comments are dropped and braces inside strings do not count towards the
+    block depth.
+    """
+    code, delta, quoted, i = [], 0, False, 0
+    while i < len(line):
+        char = line[i]
+        if quoted:
+            code.append(char)
+            if char == "\\" and i + 1 < len(line):
+                i += 1
+                code.append(line[i])
+            elif char == '"':
+                quoted = False
+        elif char == "#" or line.startswith("//", i):
+            break
+        else:
+            if char == '"':
+                quoted = True
+            elif char in "{[":
+                delta += 1
+            elif char in "}]":
+                delta -= 1
+            code.append(char)
+        i += 1
+    return "".join(code), delta
+
+
 def strip_comment(line):
-    quoted = False
-    for i, char in enumerate(line):
-        if char == '"' and (i == 0 or line[i - 1] != "\\"):
-            quoted = not quoted
-        elif not quoted and (char == "#" or line.startswith("//", i)):
-            return line[:i]
-    return line
+    return scan_line(line)[0]
 
 
 def top_level_assignments(path):
     """Return {key: raw value} for top-level `key = value` lines of a tfvars file."""
     values, depth = {}, 0
     for line in Path(path).read_text().splitlines():
-        code = strip_comment(line)
+        code, delta = scan_line(line)
         if depth == 0:
             match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", code)
             if match:
                 values[match.group(1)] = match.group(2)
-        depth += sum(code.count(c) for c in "{[") - sum(code.count(c) for c in "}]")
-        depth = max(depth, 0)
+        depth = max(depth + delta, 0)
     return values
 
 
@@ -90,6 +297,85 @@ def string_value(raw):
         return None
     match = re.fullmatch(r'"([^"]*)"', raw.strip())
     return match.group(1) if match else None
+
+
+def scalar_value(raw):
+    """The first scalar of a raw tfvars value as text: "x" -> x, true -> true, null -> ''."""
+    raw = raw.lstrip()
+    if raw.startswith('"'):
+        return raw[1:].split('"', 1)[0]
+    value = re.split(r"[\s,}]", raw, maxsplit=1)[0]
+    return "" if value == "null" else value
+
+
+ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+INLINE_ASSIGNMENT = re.compile(r"(?:^|[,\s])([A-Za-z_][A-Za-z0-9_]*)\s*=\s*")
+
+
+def tfvars_settings(path):
+    """Scalar settings of a tfvars file as {(parent, key): text}.
+
+    Top-level settings have parent None; settings inside a top-level
+    `parent = { ... }` block (on following lines or inline) have that block
+    name. The first occurrence wins, null reads as '', and blocks and lists
+    themselves read as ''. ./infra reads every environment setting this way.
+    """
+    settings, depth, parent = {}, 0, None
+    for line in Path(path).read_text().splitlines():
+        code, delta = scan_line(line)
+        if depth == 0:
+            parent = None
+            if match := ASSIGNMENT.match(code):
+                key, rest = match.group(1), match.group(2).lstrip()
+                if rest.startswith(("{", "[")):
+                    settings.setdefault((None, key), "")
+                if rest.startswith("{"):
+                    parent, inline = key, rest[1:]
+                    for inner in INLINE_ASSIGNMENT.finditer(inline):
+                        settings.setdefault((parent, inner.group(1)), scalar_value(inline[inner.end():]))
+                else:
+                    settings.setdefault((None, key), scalar_value(rest))
+        elif depth == 1 and parent is not None and (match := ASSIGNMENT.match(code)):
+            settings.setdefault((parent, match.group(1)), scalar_value(match.group(2)))
+        depth += delta
+        if depth <= 0:
+            depth, parent = 0, None
+    return settings
+
+
+def tfvar_value(path, key, parent=None):
+    return tfvars_settings(path).get((parent, key), "")
+
+
+def command_tfvar(args):
+    if not Path(args.tfvars).is_file():
+        die(f"tfvars file not found: {args.tfvars}")
+    value = tfvar_value(args.tfvars, args.key, args.parent)
+    if value:
+        print(value)
+    return 0
+
+
+def command_settings(args):
+    """Internal: print the environment's settings and target as shell assignments for ./infra to eval.
+
+    One call replaces a Python start per setting read: ENV_SETTING__<key> and
+    ENV_SETTING__<parent>__<key> hold the tfvars values, ENV_TARGET_FIELD__<field>
+    (dots as __) the fields of the environment's target when it is defined.
+    """
+    if not Path(args.tfvars).is_file():
+        die(f"tfvars file not found: {args.tfvars}")
+    settings = tfvars_settings(args.tfvars)
+    for (parent, key), value in settings.items():
+        name = f"ENV_SETTING__{parent}__{key}" if parent else f"ENV_SETTING__{key}"
+        print(f"{name}={shlex.quote(value)}")
+    target = load_targets().get(settings.get((None, "target"), ""))
+    if target:
+        for field, value in target.items():
+            for leaf, text in (value.items() if isinstance(value, dict) else [(None, value)]):
+                name = f"ENV_TARGET_FIELD__{field}__{leaf}" if leaf else f"ENV_TARGET_FIELD__{field}"
+                print(f"{name}={shlex.quote(text)}")
+    return 0
 
 
 def deployment_id_for(tfvars):
@@ -249,6 +535,14 @@ def enabled(config, name):
     return bool(config.get("features", {}).get(name))
 
 
+def lakeflow_method(cloud, config, source):
+    """The change capture method the lab check job sets up for a source, or None."""
+    default, method = LAKEFLOW_SOURCES.get(cloud, {}).get(source, (False, None))
+    if method and config.get(source, {}).get("lakeflow_connect_enabled", default):
+        return method
+    return None
+
+
 def source_paths(cloud, config, components):
     """Return [{source, compute, mode}] for every enabled source with connectivity."""
     paths = []
@@ -339,6 +633,12 @@ def analyze(cloud, config, manifest, explicit=None, target_name=None, target=Non
             finding("info", "Without the Key Vault-backed secret scope, the Azure SQL check only tests TCP reachability and loads no sample data.")
     if cloud == "aws" and config.get("glue_federation", {}).get("databricks_connectivity_enabled") and not enabled(config, "unity_catalog"):
         finding("error", "glue_federation.databricks_connectivity_enabled needs features.unity_catalog.")
+    for source in sorted({path["source"] for path in paths}):
+        method = lakeflow_method(cloud, config, source)
+        if method and source in disconnected:
+            finding("info", f"{source} gets its Lakeflow Connect {method} setup from the lab check job, which needs a classic or serverless path; with none, the setup does not run.")
+    if cloud == "azure" and enabled(config, "sql_server_vm") and config.get("sql_server_vm", {}).get("lakeflow_connect_enabled", True):
+        finding("info", "sql_server_vm is prepared for Lakeflow Connect CDC during apply, from inside the VM through Azure VM Run Command; it needs no network path.")
     for name in built:
         component = components[name]
         if component.get("cost") == "high":
@@ -350,6 +650,8 @@ def analyze(cloud, config, manifest, explicit=None, target_name=None, target=Non
             "compute": path["compute"],
             "mode": path["mode"],
             "sample_data": path["source"] in SEEDED_SOURCES[cloud] and (cloud != "azure" or "key_vault" in derived),
+            "lakeflow_setup": lakeflow_method(cloud, config, path["source"])
+            if path["source"] in SEEDED_SOURCES[cloud] and (cloud != "azure" or "key_vault" in derived) else None,
         }
         for path in paths
         if path["mode"] != "none" and "lab_check" in derived
@@ -415,6 +717,8 @@ def render_explanation(report, tfvars):
         lines.append(f"  - ./infra verify {cloud} {display(tfvars)} runs these checks:")
         for check in report["checks"]:
             extra = ", loading the sample tables customers and orders" if check["sample_data"] else ""
+            if check.get("lakeflow_setup"):
+                extra += f", then preparing it for Lakeflow Connect ({check['lakeflow_setup']})"
             lines.append(f"      {check['compute']} -> {check['source']} over {check['mode']}{extra}")
     else:
         lines.append("  - No lab checks: no source has a compute path.")
@@ -626,6 +930,28 @@ def main(argv):
     status.add_argument("tfvars")
     status.add_argument("--json", action="store_true")
 
+    targets = commands.add_parser("targets")
+    targets.add_argument("--json", action="store_true")
+    actions = targets.add_subparsers(dest="action")
+    add = actions.add_parser("add")
+    add.add_argument("name")
+    add.add_argument("--cloud", default="")
+    for option in TARGET_OPTIONS:
+        add.add_argument(f"--{option.replace('_', '-')}")
+    remove = actions.add_parser("remove")
+    remove.add_argument("name")
+
+    # Internal commands ./infra uses to read settings; not listed in its usage.
+    tfvar = commands.add_parser("tfvar")
+    tfvar.add_argument("tfvars")
+    tfvar.add_argument("key")
+    tfvar.add_argument("parent", nargs="?")
+    target = commands.add_parser("target")
+    target.add_argument("name")
+    target.add_argument("field", nargs="?")
+    settings = commands.add_parser("settings")
+    settings.add_argument("tfvars")
+
     try:
         args = parser.parse_args(argv)
     except SystemExit:
@@ -637,6 +963,10 @@ def main(argv):
         "explain": command_explain,
         "ls": command_ls,
         "status": command_status,
+        "targets": command_targets,
+        "tfvar": command_tfvar,
+        "target": command_target,
+        "settings": command_settings,
     }
     return handlers[args.command](args)
 

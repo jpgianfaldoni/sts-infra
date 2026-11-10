@@ -9,6 +9,13 @@ features = {
 
 # Serverless compute reaches PostgreSQL through an NCC private endpoint rule to
 # an internal NLB and endpoint service; ./infra accepts the connection after apply.
+# Lakeflow Connect: logical replication on the instance, and a replication
+# login, publication, and slot that ./infra verify's lab check job creates.
+rds_postgres = {
+  engine_version           = "16"
+  lakeflow_connect_enabled = true
+}
+
 connectivity = {
   rds_postgres = {
     classic    = "none"

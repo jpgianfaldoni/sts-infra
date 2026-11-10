@@ -72,9 +72,10 @@ output "rds_postgres" {
 }
 output "rds_sql_server" {
   value = try({ host = module.rds_sql_server[0].host
-    port       = module.rds_sql_server[0].port
-    username   = module.rds_sql_server[0].master_username
-    secret_arn = module.rds_sql_server[0].master_secret_arn
+    port                = module.rds_sql_server[0].port
+    username            = module.rds_sql_server[0].master_username
+    secret_arn          = module.rds_sql_server[0].master_secret_arn
+    lakeflow_secret_arn = module.rds_sql_server[0].lakeflow_secret_arn
   }, null)
 }
 output "aurora_postgres" {
@@ -252,7 +253,7 @@ output "lab_check" {
     job_id       = module.lab_check[0].job_id
     job_url      = module.lab_check[0].job_url
     secret_scope = module.lab_check[0].managed_secret_scope
-    credentials  = local.lab_check_credentials
+    credentials  = concat(local.lab_check_credentials, local.lab_check_cdc_credentials)
     checks       = module.lab_check[0].checks
   } : null
 }

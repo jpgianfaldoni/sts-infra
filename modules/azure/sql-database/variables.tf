@@ -38,3 +38,8 @@ variable "tags" {
   default = {
   }
 }
+variable "lakeflow_connect_enabled" {
+  description = "Generate a Lakeflow Connect ingestion login; the lab check job creates it and enables change tracking on the sample tables."
+  type        = bool
+  default     = true
+}

@@ -24,6 +24,11 @@ variable "checks" {
     username_key  = optional(string)
     password_key  = optional(string)
     run_after     = optional(string)
+    # Lakeflow Connect source setup that runs after the sample data loads:
+    # sqlserver_cdc, sqlserver_ct (change tracking), or postgresql_logical.
+    cdc_method       = optional(string)
+    cdc_username_key = optional(string)
+    cdc_password_key = optional(string)
   }))
 
   validation {
@@ -42,6 +47,17 @@ variable "checks" {
       check.engine == "tcp" || (check.secret_scope != null && check.username_key != null && check.password_key != null && check.database != null)
     ])
     error_message = "Database checks need database, secret_scope, username_key, and password_key."
+  }
+
+  validation {
+    condition = alltrue([
+      for check in values(var.checks) :
+      check.cdc_method == null || (
+        check.seed_file != null && check.cdc_username_key != null && check.cdc_password_key != null &&
+        contains(check.engine == "postgresql" ? ["postgresql_logical"] : check.engine == "sqlserver" ? ["sqlserver_cdc", "sqlserver_ct"] : [], check.cdc_method)
+      )
+    ])
+    error_message = "cdc_method must match the engine (postgresql_logical for postgresql; sqlserver_cdc or sqlserver_ct for sqlserver) and needs seed_file, cdc_username_key, and cdc_password_key."
   }
 }
 

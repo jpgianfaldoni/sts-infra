@@ -21,6 +21,8 @@ locals {
         seed_database   = module.rds_postgres[0].database_name
         seed_file       = module.rds_postgres[0].seed_file
         secret_arn      = module.rds_postgres[0].master_secret_arn
+        cdc_method      = var.rds_postgres.lakeflow_connect_enabled ? "postgresql_logical" : null
+        cdc_secret_arn  = module.rds_postgres[0].lakeflow_replication_secret_arn
       }
     } : {},
     var.features.rds_sql_server ? {
@@ -36,6 +38,8 @@ locals {
         seed_database   = "master"
         seed_file       = module.rds_sql_server[0].seed_file
         secret_arn      = module.rds_sql_server[0].master_secret_arn
+        cdc_method      = var.rds_sql_server.lakeflow_connect_enabled ? "sqlserver_cdc" : null
+        cdc_secret_arn  = module.rds_sql_server[0].lakeflow_secret_arn
       }
     } : {},
     # Aurora is reached through its reader endpoint, which is read-only, so its
@@ -53,6 +57,8 @@ locals {
         seed_database   = null
         seed_file       = null
         secret_arn      = module.aurora_postgres[0].master_secret_arn
+        cdc_method      = null
+        cdc_secret_arn  = null
       }
     } : {},
     var.features.rabbitmq ? {
@@ -68,6 +74,8 @@ locals {
         seed_database   = null
         seed_file       = null
         secret_arn      = null
+        cdc_method      = null
+        cdc_secret_arn  = null
       }
     } : {},
     var.features.kafka ? {
@@ -83,6 +91,8 @@ locals {
         seed_database   = null
         seed_file       = null
         secret_arn      = null
+        cdc_method      = null
+        cdc_secret_arn  = null
       }
     } : {},
     var.features.simulated_on_prem ? {
@@ -98,6 +108,8 @@ locals {
         seed_database   = null
         seed_file       = null
         secret_arn      = null
+        cdc_method      = null
+        cdc_secret_arn  = null
       }
     } : {},
   )
@@ -119,6 +131,10 @@ locals {
           username_key  = config.engine == "tcp" ? null : "${source}-username"
           password_key  = config.engine == "tcp" ? null : "${source}-password"
           run_after     = compute == "serverless" && config.classic != "none" ? "${source}_classic" : null
+          # Lakeflow Connect source setup runs after the sample data loads.
+          cdc_method       = config.seed_file == null ? null : config.cdc_method
+          cdc_username_key = config.cdc_method == null ? null : "${source}-lakeflow-username"
+          cdc_password_key = config.cdc_method == null ? null : "${source}-lakeflow-password"
         }
       } if config[compute] != "none"
     ]
@@ -133,6 +149,16 @@ locals {
       password_key = "${source}-password"
     }
     if config.engine != "tcp" && (config.classic != "none" || config.serverless != "none")
+  ]
+  # The Lakeflow Connect ingestion credentials, copied the same way.
+  lab_check_cdc_credentials = [
+    for source, config in local.lab_check_sources : {
+      source       = "${source} Lakeflow Connect"
+      secret_arn   = config.cdc_secret_arn
+      username_key = "${source}-lakeflow-username"
+      password_key = "${source}-lakeflow-password"
+    }
+    if config.cdc_method != null && config.seed_file != null && (config.classic != "none" || config.serverless != "none")
   ]
 
   lab_check_enabled = var.features.workspace && var.lab_check.enabled && var.workspace_resources_enabled && length(local.lab_checks) > 0

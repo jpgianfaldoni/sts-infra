@@ -7,6 +7,13 @@ features = {
   rds_postgres  = true
 }
 
+# Lakeflow Connect: logical replication on the instance, and a replication
+# login, publication, and slot that ./infra verify's lab check job creates.
+rds_postgres = {
+  engine_version           = "16"
+  lakeflow_connect_enabled = true
+}
+
 connectivity = {
   rds_postgres = {
     classic    = "peering"

@@ -1346,3 +1346,85 @@ run "foundation_without_workspace_resources_is_complete" {
     error_message = "A workspace without workspace-level resources needs no second stage."
   }
 }
+
+run "lab_check_enables_cdc_on_rds_sql_server" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace      = true
+      rds_sql_server = true
+    }
+    connectivity = {
+      rds_sql_server = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  assert {
+    condition     = output.lab_check.checks.rds_sql_server_classic.cdc == "sqlserver_cdc"
+    error_message = "RDS SQL Server must be prepared for Lakeflow Connect CDC by default."
+  }
+  assert {
+    condition = (
+      length(output.lab_check.credentials) == 2 &&
+      output.lab_check.credentials[1].username_key == "rds_sql_server-lakeflow-username" &&
+      output.lab_check.credentials[1].password_key == "rds_sql_server-lakeflow-password"
+    )
+    error_message = "./infra verify must copy the Lakeflow Connect ingestion login into the scope."
+  }
+}
+
+run "lab_check_rds_sql_server_cdc_can_be_disabled" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace      = true
+      rds_sql_server = true
+    }
+    rds_sql_server = {
+      lakeflow_connect_enabled = false
+    }
+    connectivity = {
+      rds_sql_server = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  assert {
+    condition     = output.lab_check.checks.rds_sql_server_classic.cdc == null && length(output.lab_check.credentials) == 1
+    error_message = "Disabling Lakeflow Connect must skip the source setup and its credentials."
+  }
+}
+
+run "lab_check_enables_logical_replication_on_rds_postgres" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      rds_postgres = true
+    }
+    rds_postgres = {
+      engine_version           = "16"
+      lakeflow_connect_enabled = true
+    }
+    connectivity = {
+      rds_postgres = {
+        classic    = "none"
+        serverless = "private_link"
+      }
+    }
+  }
+  assert {
+    condition     = output.lab_check.checks.rds_postgres_serverless.cdc == "postgresql_logical"
+    error_message = "RDS PostgreSQL with Lakeflow Connect must get the logical replication setup."
+  }
+  assert {
+    condition     = length(output.lab_check.credentials) == 2 && output.lab_check.credentials[1].username_key == "rds_postgres-lakeflow-username"
+    error_message = "./infra verify must copy the replication login into the scope."
+  }
+}

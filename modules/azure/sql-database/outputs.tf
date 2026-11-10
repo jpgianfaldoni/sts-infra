@@ -43,3 +43,10 @@ output "seed_file" {
   description = "Idempotent sample-data script that the lab check job runs."
   value       = "${path.module}/assets/seed.sql"
 }
+output "lakeflow_username" {
+  value = var.lakeflow_connect_enabled ? "lakeflow" : null
+}
+output "lakeflow_password" {
+  value     = try(random_password.lakeflow[0].result, null)
+  sensitive = true
+}

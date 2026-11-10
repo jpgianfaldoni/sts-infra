@@ -129,7 +129,8 @@ module "sql_database" {
     object_id      = data.azurerm_client_config.current.object_id
     tenant_id      = data.azurerm_client_config.current.tenant_id
   } : null
-  tags = var.tags
+  lakeflow_connect_enabled = var.features.workspace && var.sql_database.lakeflow_connect_enabled
+  tags                     = var.tags
 }
 
 module "sql_database_workspace_peering" {
@@ -166,25 +167,41 @@ module "sql_server_vm" {
   vm_subnet_prefixes                   = var.sql_vm_network.vm_subnet_prefixes
   private_link_service_subnet_prefixes = var.sql_vm_network.private_link_service_subnet_prefixes
   vm_private_ip                        = var.sql_vm_network.vm_private_ip
+  lakeflow_connect_enabled             = var.sql_server_vm.lakeflow_connect_enabled
+  lakeflow_username                    = var.sql_server_vm.lakeflow_username
+  private_dns_name                     = var.sql_server_vm.private_dns_name
   tags                                 = var.tags
 }
 
 locals {
-  key_vault_enabled = var.key_vault.enabled && (var.features.sql_database || var.features.sql_server_vm)
+  sql_server_vm_lakeflow = var.features.sql_server_vm && var.sql_server_vm.lakeflow_connect_enabled
+  # The lab check job creates the login, so it exists only with the workspace.
+  sql_database_lakeflow = var.features.sql_database && var.features.workspace && var.sql_database.lakeflow_connect_enabled
+  key_vault_enabled     = var.key_vault.enabled && (var.features.sql_database || var.features.sql_server_vm)
   key_vault_secret_names = concat(
     var.features.sql_database ? ["sql-database-admin-username", "sql-database-admin-password"] : [],
+    local.sql_database_lakeflow ? ["sql-database-lakeflow-username", "sql-database-lakeflow-password"] : [],
     var.features.sql_server_vm ? ["sql-server-vm-sql-username", "sql-server-vm-sql-password", "sql-server-vm-admin-username", "sql-server-vm-admin-password"] : [],
+    local.sql_server_vm_lakeflow ? ["sql-server-vm-lakeflow-username", "sql-server-vm-lakeflow-password"] : [],
   )
   key_vault_secrets = merge(
     var.features.sql_database ? {
       "sql-database-admin-username" = module.sql_database[0].admin_username
       "sql-database-admin-password" = module.sql_database[0].admin_password
     } : {},
+    local.sql_database_lakeflow ? {
+      "sql-database-lakeflow-username" = module.sql_database[0].lakeflow_username
+      "sql-database-lakeflow-password" = module.sql_database[0].lakeflow_password
+    } : {},
     var.features.sql_server_vm ? {
       "sql-server-vm-sql-username"   = module.sql_server_vm[0].sql_username
       "sql-server-vm-sql-password"   = module.sql_server_vm[0].sql_password
       "sql-server-vm-admin-username" = module.sql_server_vm[0].vm_username
       "sql-server-vm-admin-password" = module.sql_server_vm[0].vm_password
+    } : {},
+    local.sql_server_vm_lakeflow ? {
+      "sql-server-vm-lakeflow-username" = module.sql_server_vm[0].lakeflow_username
+      "sql-server-vm-lakeflow-password" = module.sql_server_vm[0].lakeflow_password
     } : {},
   )
 }

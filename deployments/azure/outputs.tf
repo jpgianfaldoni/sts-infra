@@ -72,9 +72,16 @@ output "sql_database_password" {
   sensitive   = true
 }
 output "sql_server_vm" {
+  description = "SQL Server VM connection details and, when enabled, the Lakeflow Connect CDC setup the VM reported. Passwords are in the Key Vault named in the key_vault output."
   value = try({ host = module.sql_server_vm[0].host
-    port     = module.sql_server_vm[0].port
-    username = module.sql_server_vm[0].sql_username
+    hostname                      = module.sql_server_vm[0].hostname
+    private_dns_zone              = module.sql_server_vm[0].private_dns_zone
+    port                          = module.sql_server_vm[0].port
+    username                      = module.sql_server_vm[0].sql_username
+    resource_group_name           = module.sql_server_vm[0].resource_group_name
+    lakeflow_username             = module.sql_server_vm[0].lakeflow_username
+    lakeflow_password_secret_name = local.sql_server_vm_lakeflow && local.key_vault_enabled ? "sql-server-vm-lakeflow-password" : null
+    lakeflow_cdc                  = module.sql_server_vm[0].lakeflow_cdc
   }, null)
 }
 output "sql_server_vm_password" {
