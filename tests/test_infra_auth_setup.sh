@@ -158,6 +158,10 @@ case "${1:-} ${2:-}" in
     echo '{"run_id": 77}'
     ;;
   "jobs get-run")
+    if [[ -n "${TEST_VERIFY_RUN:-}" ]]; then
+      echo "$TEST_VERIFY_RUN"
+      exit 0
+    fi
     result=SUCCESS
     [[ -z "${TEST_VERIFY_FAIL:-}" ]] || result=FAILED
     printf '{"run_id":77,"run_page_url":"https://dbc-lab.cloud.databricks.com/jobs/55/runs/77","state":{"life_cycle_state":"TERMINATED"},"tasks":[{"task_key":"rds_postgres_classic","run_id":78,"state":{"life_cycle_state":"TERMINATED","result_state":"%s"}}]}\n' "$result"
@@ -233,7 +237,11 @@ printf 'terraform %s\n' "$*" >> "$TEST_CALL_LOG"
 [[ "${1:-}" != -chdir=* ]] || shift
 case "${1:-}" in
   version) echo '{"terraform_version":"1.14.6"}' ;;
-  init|apply|state) : ;;
+  init) : ;;
+  apply) [[ -z "${TEST_TF_APPLY_FAIL:-}" ]] || exit 1 ;;
+  state)
+    [[ "${2:-}" != list ]] || printf '%s' "${TEST_STATE_LIST:-}"
+    ;;
   plan)
     for arg in "$@"; do
       [[ "$arg" != -out=* ]] || echo plan > "${arg#-out=}"
@@ -342,16 +350,13 @@ databricks_account_id = "$ACCOUNT_ID"
 EOF
 
 # --- tfvars parsing --------------------------------------------------------
-(
-  # shellcheck source=/dev/null
-  source "$INFRA"
-  [[ "$(tfvar_value "$AWS_VARS" region)" == "us-east-1" ]] || fail "trailing // comment leaked into region"
-  [[ "$(tfvar_value "$AWS_VARS" databricks_account_id)" == "$ACCOUNT_ID" ]] || fail "trailing # comment leaked into the account ID"
-  [[ -z "$(tfvar_value "$AWS_VARS" aws_profile)" ]] || fail "null was not treated as unset"
-  [[ "$(tfvar_value "$AWS_VARS" unity_catalog features)" == "true" ]] || fail "nested feature flag not read"
-  [[ -z "$(tfvar_value "$AWS_VARS" workspace)" ]] || fail "nested key matched at the top level"
-  [[ "$(tfvar_value "$AZURE_VARS" volume_storage_path external_volume_storage)" == "seed/path" ]] || fail "nested string not read"
-)
+tfvar() { python3 -I "$ROOT/lib/infra_scenario.py" tfvar "$@"; }
+[[ "$(tfvar "$AWS_VARS" region)" == "us-east-1" ]] || fail "trailing // comment leaked into region"
+[[ "$(tfvar "$AWS_VARS" databricks_account_id)" == "$ACCOUNT_ID" ]] || fail "trailing # comment leaked into the account ID"
+[[ -z "$(tfvar "$AWS_VARS" aws_profile)" ]] || fail "null was not treated as unset"
+[[ "$(tfvar "$AWS_VARS" unity_catalog features)" == "true" ]] || fail "nested feature flag not read"
+[[ -z "$(tfvar "$AWS_VARS" workspace)" ]] || fail "nested key matched at the top level"
+[[ "$(tfvar "$AZURE_VARS" volume_storage_path external_volume_storage)" == "seed/path" ]] || fail "nested string not read"
 pass "tfvars parsing ignores comments, null, and nested keys"
 
 # --- AWS: setup without prompts ---------------------------------------------
@@ -834,4 +839,235 @@ expect_code 1 "verify during the foundation stage"
 expect_text "added by the second deployment stage" "foundation stage not explained"
 pass "verify explains that the lab check arrives with the second stage"
 
-echo "infra authentication tests passed"
+# --- CLI parity: usage, gates, saved plans, state operations -----------------
+# These pin behavior the Python CLI must keep: exit codes, messages that agents
+# and docs rely on, and the exact commands passed to Terraform and the clouds.
+run "$INFRA"
+expect_code 2 "no arguments"
+expect_text "Usage:" "usage not printed"
+run "$INFRA" bogus
+expect_code 2 "unknown command"
+run "$INFRA" plan aws
+expect_code 2 "plan without an environment"
+run "$INFRA" validate
+expect_code 2 "validate without a cloud"
+run "$INFRA" list
+expect_code 0 "list"
+expect_json 'type == "object"' "list does not print the component manifest"
+run "$INFRA" output aws "$AWS_VARS" --yaml
+expect_code 2 "output with an unknown format"
+run "$INFRA" setup aws "$AWS_VARS" --bogus
+expect_code 1 "setup with an unknown option"
+expect_text "unknown setup option: --bogus" "unknown setup option not named"
+run "$INFRA" doctor aws "$AWS_VARS" --wait soon
+expect_code 1 "doctor with a non-numeric wait"
+expect_text "--wait requires a number of seconds" "doctor --wait not validated"
+run "$INFRA" seed-access-plan aws "$AWS_VARS"
+expect_code 1 "seed access on AWS"
+expect_text "seed access currently supports azure only" "seed access cloud not validated"
+pass "usage errors exit 2 and invalid options are named"
+
+run "$INFRA" doctor aws "$AWS_VARS"
+expect_code 0 "human doctor output"
+expect_text "  [ok]       tools                 terraform 1.14.6, aws-cli 2.27.14" "doctor rows changed layout"
+expect_text "Ready." "doctor did not report ready"
+run "$INFRA" doctor aws --json
+expect_code 0 "doctor without an environment"
+expect_json '.checks[0].id == "tools" and .deployment_id == null and .tfvars == null and .ready' "tooling-only doctor JSON changed"
+run "$INFRA" auth aws "$AWS_VARS" --json
+expect_code 0 "deprecated auth alias"
+expect_text "'./infra auth' is deprecated" "auth alias warning missing"
+pass "doctor keeps its text layout, tooling-only mode, and the auth alias"
+
+reset_log
+run "$INFRA" destroy aws "$AWS_VARS"
+expect_code 1 "destroy without confirmation"
+expect_text "destroy requires: --confirm destroy-<cloud>" "destroy confirmation not explained"
+run "$INFRA" destroy aws "$AWS_VARS" --confirm destroy-azure
+expect_code 1 "destroy with another cloud's confirmation"
+expect_no_log '^terraform .* apply '
+pass "destroy requires the cloud-specific confirmation"
+
+reset_log
+run "$INFRA" plan aws "$AWS_VARS" --replace 'aws_instance.broker["a"]'
+expect_code 0 "plan with --replace"
+expect_log ' -out=[^ ]*apply.tfplan -replace=aws_instance.broker\["a"\]$'
+run "$INFRA" plan aws "$AWS_VARS" --replace 'aws_instance.broker;rm'
+expect_code 1 "plan with an invalid --replace address"
+expect_text "invalid resource address for --replace" "invalid --replace address accepted"
+run "$INFRA" plan aws "$AWS_VARS" --replace
+expect_code 2 "plan with --replace and no address"
+run "$INFRA" plan aws "$AWS_VARS" --bogus
+expect_code 2 "plan with an unknown option"
+pass "plan --replace passes each address to Terraform and rejects unsafe ones"
+
+PLAN_DIR="$ROOT/.artifacts/aws/aws-lab"
+run "$INFRA" plan aws "$AWS_VARS"
+expect_code 0 "plan before metadata checks"
+for line in version=1 action=apply cloud=aws deployment_id=aws-lab "tfvars_path=$AWS_VARS" \
+  "state_path=$ROOT/.state/aws/aws-lab/terraform.tfstate" stage=complete; do
+  grep -qxF "$line" "$PLAN_DIR/apply.tfplan.metadata" || { cat "$PLAN_DIR/apply.tfplan.metadata" >&2; fail "plan metadata lacks $line"; }
+done
+for key in tfvars_sha256 plan_sha256 configuration_sha256 auth_context_sha256; do
+  grep -Eq "^$key=[0-9a-f]{64}$" "$PLAN_DIR/apply.tfplan.metadata" || fail "plan metadata lacks a $key digest"
+done
+cp "$AWS_VARS" "$TEST_DIR/aws-lab.tfvars.saved"
+echo '# edited after planning' >> "$AWS_VARS"
+run "$INFRA" apply aws "$AWS_VARS"
+expect_code 1 "apply after editing tfvars"
+expect_text "tfvars changed after the saved plan; create a new plan" "edited tfvars not detected"
+cp "$TEST_DIR/aws-lab.tfvars.saved" "$AWS_VARS"
+run "$INFRA" plan aws "$AWS_VARS"
+run "$INFRA" apply aws "$AWS_VARS"
+expect_code 0 "apply a fresh plan"
+[[ -f "$PLAN_DIR/apply.tfplan.applied" ]] || fail "applied plan not marked"
+run "$INFRA" apply aws "$AWS_VARS"
+expect_code 1 "apply the same plan twice"
+expect_text "this saved plan was already applied; create a new plan" "reapplied plan not refused"
+rm -f "$PLAN_DIR/apply.tfplan"
+run "$INFRA" apply aws "$AWS_VARS"
+expect_code 1 "apply without a plan"
+expect_text "no saved apply plan for deployment 'aws-lab'; create one first" "missing plan not explained"
+pass "saved plans are bound to their tfvars and applied once"
+
+run "$INFRA" plan aws "$AWS_VARS"
+run TEST_TF_APPLY_FAIL=1 TEST_STATE_LIST=$'aws_vpc.this\naws_subnet.a\n' "$INFRA" apply aws "$AWS_VARS"
+expect_code 1 "failed apply"
+expect_text "Terraform state currently contains 2 resource instance(s)." "state size not reported after a failure"
+expect_text "The failed saved plan was invalidated." "failed plan not invalidated"
+expect_text "ERROR: Terraform apply failed; resources may have changed before the failure." "failure not reported"
+[[ -f "$PLAN_DIR/apply.tfplan.failed" && -f "$PLAN_DIR/apply.tfplan.metadata.failed" && ! -f "$PLAN_DIR/apply.tfplan.metadata" ]] ||
+  fail "failed plan files not recorded"
+[[ ! -d "$PLAN_DIR/.operation.lock" ]] || fail "operation lock kept after a failed apply"
+run "$INFRA" apply aws "$AWS_VARS"
+expect_code 1 "apply an invalidated plan"
+expect_text "saved plan metadata is missing; create a new plan" "invalidated plan was applied"
+pass "a failed apply invalidates its plan and reports the state"
+
+LOCK="$PLAN_DIR/.operation.lock"
+mkdir -p "$LOCK"
+echo "$$" > "$LOCK/pid"
+hostname > "$LOCK/host"
+echo "./infra apply aws other" > "$LOCK/command"
+run "$INFRA" plan aws "$AWS_VARS"
+expect_code 1 "plan while another operation runs"
+expect_text "another operation is already running for deployment 'aws-lab' (process $$" "live lock not reported"
+rm -rf "$LOCK"
+mkdir -p "$ROOT/environments/other"
+cp "$AWS_VARS" "$ROOT/environments/other/aws-lab.tfvars"
+run "$INFRA" plan aws "$ROOT/environments/other/aws-lab.tfvars"
+expect_code 1 "plan for a second file with the same deployment ID"
+expect_text "deployment ID 'aws-lab' is already bound to another environment file" "deployment ID collision not detected"
+run INFRA_DEPLOYMENT_ID='bad id' "$INFRA" plan aws "$AWS_VARS"
+expect_code 1 "invalid deployment ID"
+expect_text "deployment ID must match" "invalid deployment ID accepted"
+run INFRA_DEPLOYMENT_ID=default "$INFRA" plan aws "$AWS_VARS"
+expect_code 1 "reserved deployment ID"
+expect_text "deployment ID 'default' is reserved by Terraform" "reserved deployment ID accepted"
+pass "operation locks and deployment IDs keep environments apart"
+
+run "$INFRA" state-forget aws "$AWS_VARS" aws_vpc.this --confirm forget-aws-other
+expect_code 1 "state-forget with the wrong confirmation"
+expect_text "state-forget requires: --confirm forget-aws-aws-lab" "state-forget confirmation not explained"
+run "$INFRA" state-forget aws "$AWS_VARS" 'aws_vpc.this;rm' --confirm forget-aws-aws-lab
+expect_code 1 "state-forget with an invalid address"
+expect_text "invalid resource address: aws_vpc.this;rm" "invalid state-forget address accepted"
+run "$INFRA" state-forget aws "$AWS_VARS" aws_vpc.this
+expect_code 1 "state-forget without confirmation"
+STATE_LIST=$'module.ncc[0].databricks_mws_ncc_private_endpoint_rule.rds_postgres[0]\naws_vpc.this\n'
+reset_log
+run TEST_STATE_LIST="$STATE_LIST" "$INFRA" state-forget aws "$AWS_VARS" 'module.ncc[0].databricks_mws_ncc_private_endpoint_rule.rds_postgres[1]' --confirm forget-aws-aws-lab
+expect_code 1 "state-forget for an address not in state"
+expect_text "  module.ncc[0].databricks_mws_ncc_private_endpoint_rule.rds_postgres[0]" "near matches not listed"
+expect_text "is not in the state of deployment 'aws-lab'" "missing address not explained"
+expect_no_log ' state rm '
+run TEST_STATE_LIST="$STATE_LIST" "$INFRA" state-forget aws "$AWS_VARS" aws_vpc.this --confirm forget-aws-aws-lab
+expect_code 0 "state-forget"
+expect_log '^terraform -chdir=.* state rm -- aws_vpc.this$'
+expect_text "Removed aws_vpc.this from the state; nothing in the cloud was deleted." "state-forget result not reported"
+pass "state-forget needs the deployment confirmation and an address in state"
+
+LEGACY_VARS="$ROOT/environments/local/aws-legacy.tfvars"
+cp "$SECOND_VARS" "$LEGACY_VARS"
+echo '{"version": 4, "resources": []}' > "$ROOT/deployments/aws/terraform.tfstate"
+echo '{"version": 4, "resources": []}' > "$ROOT/deployments/aws/terraform.tfstate.backup"
+run "$INFRA" plan aws "$LEGACY_VARS"
+expect_code 1 "plan with legacy state"
+expect_text "Migrate it explicitly with: ./infra state-migrate aws $LEGACY_VARS --confirm migrate-aws-aws-legacy" "legacy state not detected"
+run "$INFRA" state-migrate aws "$LEGACY_VARS" --confirm migrate-aws-wrong
+expect_code 1 "state-migrate with the wrong confirmation"
+expect_text "state migration requires: --confirm migrate-aws-aws-legacy" "state-migrate confirmation not explained"
+run "$INFRA" state-migrate aws "$LEGACY_VARS" --confirm migrate-aws-aws-legacy
+expect_code 0 "state-migrate"
+[[ -f "$ROOT/.state/aws/aws-legacy/terraform.tfstate" && -f "$ROOT/.state/aws/aws-legacy/terraform.tfstate.backup" &&
+  ! -e "$ROOT/deployments/aws/terraform.tfstate" ]] || fail "legacy state not moved"
+pass "legacy state must be migrated explicitly"
+
+run TEST_OUTPUT_JSON='{"ncc_rules": {"sensitive": false, "value": {"rds_postgres": "rule-1"}}}' "$INFRA" endpoints aws status "$AWS_VARS"
+expect_code 0 "AWS endpoint status"
+expect_json '.pending_endpoint_acceptances == [] and .connectivity == null and .ncc_rules.rds_postgres == "rule-1"' "AWS endpoint status shape changed"
+run "$INFRA" endpoints aws accept "$AWS_VARS" --service-id vpce-svc-9
+expect_code 1 "accept without an endpoint"
+expect_text "accept requires: <environment.tfvars> --service-id <id> --endpoint-id <id>" "accept usage not explained"
+reset_log
+run "$INFRA" endpoints aws accept "$AWS_VARS" --service-id vpce-svc-9 --endpoint-id vpce-9
+expect_code 0 "manual AWS endpoint acceptance"
+expect_log '^aws ec2 accept-vpc-endpoint-connections --service-id vpce-svc-9 --vpc-endpoint-ids vpce-9 --region us-east-1 --profile sts-aws-123456789012$'
+run "$INFRA" endpoints aws reject "$AWS_VARS" --service-id vpce-svc-9 --endpoint-id vpce-9
+expect_code 1 "reject without confirmation"
+expect_text "--confirm reject-aws-endpoint" "reject confirmation not explained"
+run "$INFRA" endpoints gcp status "$AWS_VARS"
+expect_code 1 "endpoints on an unknown cloud"
+run "$INFRA" endpoints azure bogus "$AZURE_VARS"
+expect_code 2 "unknown Azure endpoint action"
+pass "endpoint commands validate their arguments and decide only the named connection"
+
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" "$INFRA" verify aws "$AWS_VARS" --endpoint-wait soon
+expect_code 2 "verify with a non-numeric endpoint wait"
+run TEST_OUTPUT_JSON='{}' "$INFRA" verify aws "$AWS_VARS"
+expect_code 1 "verify without a lab check"
+expect_text "this deployment has no lab check job" "missing lab check not explained"
+RETRIED_RUN='{"run_id":77,"run_page_url":"https://dbc-lab.cloud.databricks.com/jobs/55/runs/77","state":{"life_cycle_state":"TERMINATED"},"tasks":[
+  {"task_key":"rds_postgres_classic","run_id":78,"attempt_number":0,"state":{"life_cycle_state":"TERMINATED","result_state":"FAILED"}},
+  {"task_key":"rds_postgres_classic","run_id":79,"attempt_number":1,"state":{"life_cycle_state":"TERMINATED","result_state":"SUCCESS"}}]}'
+CDC_OUTPUT="$(jq -cn '{notebook_output: {result: ({status: "passed", seeded: true, rows: {customers: 3, orders: 5},
+  cdc: {method: "logical_replication", ingestion_user: "lakeflow"}} | tojson)}}')"
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" TEST_VERIFY_RUN="$RETRIED_RUN" TEST_VERIFY_OUTPUT="$CDC_OUTPUT" STS_INFRA_VERIFY_INTERVAL=0 "$INFRA" verify aws "$AWS_VARS"
+expect_code 0 "verify after a retried task"
+expect_text "[pass] rds_postgres from classic compute over peering: sample data customers=3, orders=5; Lakeflow Connect logical_replication ready for lakeflow" \
+  "passing line changed"
+expect_text "All network paths work." "verify success not reported"
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" TEST_VERIFY_RUN="$RETRIED_RUN" TEST_VERIFY_OUTPUT="$CDC_OUTPUT" STS_INFRA_VERIFY_INTERVAL=0 "$INFRA" verify aws "$AWS_VARS" --json
+expect_json '(.checks | length) == 1 and .checks[0].status == "passed" and .checks[0].cdc.ingestion_user == "lakeflow"' "retried attempts double-counted"
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" TEST_VERIFY_OUTPUT='not json' STS_INFRA_VERIFY_INTERVAL=0 "$INFRA" verify aws "$AWS_VARS"
+expect_code 13 "verify with malformed task output"
+expect_text "[FAIL] rds_postgres from classic compute over peering" "malformed output crashed verify"
+SKIPPED_RUN='{"run_id":77,"state":{"life_cycle_state":"TERMINATED"},"tasks":[{"task_key":"rds_postgres_classic","run_id":78,"state":{"life_cycle_state":"TERMINATED","result_state":"UPSTREAM_FAILED"}}]}'
+run TEST_OUTPUT_JSON="$LAB_OUTPUT" TEST_VERIFY_RUN="$SKIPPED_RUN" STS_INFRA_VERIFY_INTERVAL=0 "$INFRA" verify aws "$AWS_VARS"
+expect_code 13 "verify with a skipped task"
+expect_text "[skip] rds_postgres from classic compute over peering" "skipped task not reported"
+expect_text "Lab check results for aws/aws-lab (run 77):" "run without a URL not labeled"
+pass "verify reports the latest attempt, tolerates bad output, and marks skipped tasks"
+
+reset_log
+run "$INFRA" seed-access-plan azure "$AZURE_VARS" --operator-ip 203.0.113.7
+expect_code 0 "seed-access plan"
+expect_log '^terraform -chdir=.* plan -var-file=.*azure-lab.tfvars .*-var=external_volume_bootstrap_access_enabled=true -var=external_volume_bootstrap_operator_cidr=203.0.113.7/32 -out=.*seed-access.tfplan$'
+expect_text "Temporary seed access is restricted to 203.0.113.7/32." "seed access CIDR not reported"
+run "$INFRA" seed-access-plan azure "$AZURE_VARS" --operator-ip 203.0.113.300
+expect_code 1 "seed-access plan with an invalid IP"
+expect_text "operator IP must be a valid IPv4 address" "invalid operator IP accepted"
+run "$INFRA" seed-access-plan azure "$AZURE_VARS" --operator-ip 203.0.113.0/24
+expect_code 1 "seed-access plan with a wide CIDR"
+expect_text "operator IP must be an IPv4 address or a /32 CIDR" "wide operator CIDR accepted"
+echo '{"resource_changes": [{"address": "azurerm_resource_group.other", "change": {"actions": ["delete"]}}]}' > "$TEST_DIR/seed-wide.json"
+run TEST_PLAN_JSON="$TEST_DIR/seed-wide.json" "$INFRA" seed-access-plan azure "$AZURE_VARS" --operator-ip 203.0.113.7
+expect_code 1 "seed-access plan with unrelated changes"
+expect_text "azurerm_resource_group.other: delete" "unrelated change not listed"
+[[ ! -f "$ROOT/.artifacts/azure/azure-lab/seed-access.tfplan" ]] || fail "an out-of-scope seed-access plan was kept"
+run TEST_OUTPUT_JSON='{"external_volume_storage": {"sensitive": false, "value": {"bootstrap_access_enabled": false}}}' "$INFRA" seed azure "$AZURE_VARS" --source "$TEST_DIR"
+expect_code 1 "seed without temporary access"
+expect_text "temporary seed access is not active" "inactive seed access not explained"
+pass "seed access is limited to one /32 and to the storage firewall changes"
+
+echo "infra CLI tests passed"
