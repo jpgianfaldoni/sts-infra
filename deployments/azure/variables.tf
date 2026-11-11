@@ -86,6 +86,9 @@ variable "features" {
     custom_dns              = optional(bool, false)
     sql_database            = optional(bool, false)
     sql_server_vm           = optional(bool, false)
+    mysql_flexible_server   = optional(bool, false)
+    mysql_vm                = optional(bool, false)
+    oracle_vm               = optional(bool, false)
   })
   default = {
   }
@@ -263,6 +266,70 @@ variable "sql_database" {
     error_message = "sql_database_network.vnet_address_space must not overlap workspace_network.vnet_cidr when workspace peering is enabled."
   }
 }
+variable "mysql_flexible_server_network" {
+  type = object({ vnet_address_space = list(string)
+    private_endpoint_subnet_prefixes = list(string)
+  })
+  default = { vnet_address_space = ["10.82.0.0/16"]
+    private_endpoint_subnet_prefixes = ["10.82.1.0/24"]
+  }
+}
+variable "mysql_flexible_server" {
+  description = "Azure Database for MySQL Flexible Server options."
+  type = object({
+    # Peer the MySQL VNet with the workspace VNet and link its private DNS zone
+    # so classic compute can reach the server privately.
+    workspace_peering_enabled = optional(bool, false)
+    version                   = optional(string, "8.4")
+    sku_name                  = optional(string, "B_Standard_B1ms")
+    # Seven-day binary log retention, and a lakeflow replication user that the
+    # lab check job creates, so Lakeflow Connect can ingest the sample tables.
+    lakeflow_connect_enabled = optional(bool, true)
+  })
+  default = {}
+
+  validation {
+    condition = (
+      !var.mysql_flexible_server.workspace_peering_enabled ||
+      (var.features.workspace && var.features.mysql_flexible_server)
+    )
+    error_message = "mysql_flexible_server.workspace_peering_enabled requires features.workspace and features.mysql_flexible_server."
+  }
+
+  validation {
+    condition = !var.mysql_flexible_server.workspace_peering_enabled || alltrue([
+      for cidr in var.mysql_flexible_server_network.vnet_address_space : !(
+        cidrhost("${cidrhost(cidr, 0)}/${split("/", var.workspace_network.vnet_cidr)[1]}", 0) == cidrhost(var.workspace_network.vnet_cidr, 0) ||
+        cidrhost("${cidrhost(var.workspace_network.vnet_cidr, 0)}/${split("/", cidr)[1]}", 0) == cidrhost(cidr, 0)
+      )
+    ])
+    error_message = "mysql_flexible_server_network.vnet_address_space must not overlap workspace_network.vnet_cidr when workspace peering is enabled."
+  }
+}
+variable "mysql_vm" {
+  description = "MySQL on an Ubuntu VM, prepared for Lakeflow Connect from inside the VM through Azure VM Run Command, without any network path to it."
+  type = object({
+    lakeflow_connect_enabled = optional(bool, true)
+    # Optional private hostname, such as mysql.lab.internal, resolved inside the VM's VNet.
+    private_dns_name   = optional(string)
+    vnet_address_space = optional(list(string), ["10.92.0.0/16"])
+    vm_subnet_prefixes = optional(list(string), ["10.92.1.0/24"])
+    vm_private_ip      = optional(string, "10.92.1.4")
+  })
+  default = {}
+}
+variable "oracle_vm" {
+  description = "Oracle Database Free on an Oracle Linux VM, prepared for Lakeflow Connect from inside the VM through Azure VM Run Command, without any network path to it."
+  type = object({
+    lakeflow_connect_enabled = optional(bool, true)
+    # Optional private hostname, such as oracle.lab.internal, resolved inside the VM's VNet.
+    private_dns_name   = optional(string)
+    vnet_address_space = optional(list(string), ["10.93.0.0/16"])
+    vm_subnet_prefixes = optional(list(string), ["10.93.1.0/24"])
+    vm_private_ip      = optional(string, "10.93.1.4")
+  })
+  default = {}
+}
 variable "key_vault" {
   description = "Azure Key Vault that stores the generated SQL passwords, optionally exposed to the workspace as a Key Vault-backed secret scope."
   type = object({
@@ -283,12 +350,24 @@ variable "connectivity" {
     sql_database = optional(object({
       serverless = optional(string, "none")
     }), {})
+    mysql_flexible_server = optional(object({
+      serverless = optional(string, "none")
+    }), {})
   })
   default = {}
 
   validation {
-    condition     = contains(["none", "private_link"], var.connectivity.sql_database.serverless)
+    condition = alltrue([for mode in [var.connectivity.sql_database.serverless, var.connectivity.mysql_flexible_server.serverless] :
+    contains(["none", "private_link"], mode)])
     error_message = "Serverless connectivity modes must be none or private_link."
+  }
+
+  validation {
+    condition = (
+      var.connectivity.mysql_flexible_server.serverless == "none" ||
+      (var.features.workspace && var.features.mysql_flexible_server && var.databricks_account_id != null)
+    )
+    error_message = "connectivity.mysql_flexible_server.serverless = \"private_link\" requires features.workspace, features.mysql_flexible_server, and databricks_account_id."
   }
 
   validation {

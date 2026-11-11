@@ -44,8 +44,15 @@ Clarify these phrasings instead of guessing:
   Serverless-only workspaces without a customer network are not supported yet.
 - "On-premises": AWS only, as the simulated on-premises network
   (`simulated_on_prem`).
-- PostgreSQL on Azure, MySQL, or other engines: not available; offer the
-  closest supported scenario.
+- MySQL: RDS for MySQL (`rds_mysql`) on AWS; Azure Database for MySQL Flexible
+  Server (`mysql_flexible_server`) or MySQL on a VM (`mysql_vm`) on Azure.
+- Oracle: RDS for Oracle (`rds_oracle`, non-multitenant Standard Edition 2) on
+  AWS; Oracle Database Free on a VM (`oracle_vm`) on Azure. Oracle PaaS on
+  Azure (Oracle Database@Azure) is not supported: Autonomous Database does not
+  expose LogMiner or CDB$ROOT to the Lakeflow Connect user, and Exadata needs a
+  marketplace subscription outside Terraform. Offer the Oracle VM instead.
+- PostgreSQL on Azure or other engines: not available; offer the closest
+  supported scenario.
 
 ## 2. Create and check the environment
 
@@ -156,13 +163,17 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
   counts and each source's Lakeflow Connect line.
 - **Lakeflow Connect source setup** runs inside `verify` for every source with
   `lakeflow_connect_enabled`: RDS SQL Server (CDC, on by default), Azure SQL
-  Database (change tracking, on by default; the Basic tier has no CDC), and RDS
-  PostgreSQL (logical replication, opt-in with `engine_version` 13 or newer).
-  The job creates a dedicated ingestion login, installs Databricks' utility
-  objects on SQL Server, and enables change capture on `customers` and
-  `orders`. It needs the same path the checks use. The Azure SQL Server VM is
-  prepared during apply through Azure VM Run Command instead, so it needs no
-  path. Ingestion logins are in Secrets Manager (`*-lakeflow-*`) or Key Vault
+  Database (change tracking, on by default; the Basic tier has no CDC), RDS
+  PostgreSQL (logical replication, opt-in with `engine_version` 13 or newer),
+  RDS for MySQL and Azure MySQL Flexible Server (binary log replication, on by
+  default), and RDS for Oracle (LogMiner, on by default). The job creates a
+  dedicated ingestion user, installs Databricks' utility objects or setup
+  package where one exists, and enables change capture on `customers` and
+  `orders` (Oracle: `LAB.CUSTOMERS` and `LAB.ORDERS`). It needs the same path
+  the checks use. The Azure SQL Server, MySQL, and Oracle VMs are prepared
+  during apply through Azure VM Run Command instead, so they need no path; the
+  Oracle VM takes 20 to 40 minutes and its Lakeflow Connect connection uses the
+  `FREE` (CDB$ROOT) service and the `C##LAKEFLOW` user. Ingestion logins are in Secrets Manager (`*-lakeflow-*`) or Key Vault
   (`*-lakeflow-username`/`-password`).
 - `./infra status <cloud> <tfvars> --json` returns `next_action` for a
   deployment from local state, which is the way to resume work in a new
@@ -183,7 +194,15 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
 | `verify` fails at `driver` | "could not install": the compute has no outbound internet access to PyPI. "Unexpected error": the pinned driver set in `modules/shared/lab-check/notebooks/lab_check.py` is incompatible; the hint lists the installed versions, and `python3 tests/test_lab_check_drivers.py` reproduces it locally. |
 | `verify` fails at `login` or `credentials` | Rerun `verify` (it refreshes the credentials); on Azure, check the Key Vault-backed scope. |
 | `verify` fails at `cdc` | Read the hint. SQL Server: the utility script download needs outbound internet. PostgreSQL: `wal_level` must be `logical` (the Lakeflow parameter group applies after a reboot). The setup is idempotent: fix the cause and rerun `verify`. |
-| `apply` fails on `lakeflow_cdc_setup` (Azure SQL Server VM) | Read the `LAKEFLOW_CDC_SETUP_FAILED` line with `az vm run-command show --resource-group <rg> --vm-name <vm> --run-command-name lakeflow-cdc-setup --instance-view`, fix it, then plan and apply again. |
+| Azure reports `AllocationFailed` on a database VM | Azure could not place the VM or its run command. Delete that VM and its OS disk, then plan and apply to recreate it; try another `vm_size` if it repeats. |
+| `apply` fails because a run command "already exists" | A failed run left the run command in Azure but not in state. Delete it with `az vm run-command delete`, then plan and apply. |
+| `apply` fails on a database VM's run command (`lakeflow-cdc-setup`, `mysql-setup`, or `oracle-setup`) | Read the `LAKEFLOW_CDC_SETUP_FAILED` line with `az vm run-command show --resource-group <rg> --vm-name <vm> --run-command-name <name> --instance-view`, fix it, then plan and apply again. |
+| Apply fails with "Too many Network Connectivity Configs" | The account hit its NCC quota in the region. Set `existing_network_connectivity_config_id` to an NCC the user owns there (ask which), then plan again; destroy leaves that NCC in place. |
+| A serverless rule shows `REJECTED` with `ABORTED: incoming resourceVersion` | Databricks rejected a concurrent NCC update. Ask the user to delete the rule (`databricks account network-connectivity delete-private-endpoint-rule <ncc-id> <rule-id>`), then `./infra state-forget <cloud> <tfvars> '<rule address>' --confirm forget-<cloud>-<deployment-id>`, plan, and apply. Rules are now created one at a time, so this should not recur. |
+| Apply warns that serverless connections were not accepted in time | The endpoint request arrived after the wait. Find it with `./infra endpoints aws status`, accept it with `./infra endpoints aws accept`, then run `verify --endpoint-wait 900`. |
+| `verify` fails at `login` on RDS MySQL with "blocked because of many connection errors" | Load balancer health checks tripped `max_connect_errors`. The module now raises it; plan and apply to update the parameter group, then rerun `verify`. |
+| `verify` fails at `cdc` on MySQL | The hint names the binary log setting. RDS: the parameter group and automated backups. Azure: the server parameters Terraform sets. |
+| `verify` fails at `cdc` on Oracle | RDS must use a non-CDB engine with automated backups (ARCHIVELOG). The error includes the Databricks setup package output. |
 | The classic check cluster cannot start | The region lacks capacity or quota for the default node type; set `lab_check.classic_node_type` (or `--classic-node-type` on the target). |
 | Destroy refuses to start on AWS | It needs the workspace login to terminate clusters: run `./infra setup aws <tfvars> --yes`. |
 

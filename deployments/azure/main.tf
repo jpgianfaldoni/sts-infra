@@ -173,16 +173,92 @@ module "sql_server_vm" {
   tags                                 = var.tags
 }
 
+module "mysql_flexible_server" {
+  count                            = var.features.mysql_flexible_server ? 1 : 0
+  source                           = "../../modules/azure/mysql-flexible-server"
+  name_prefix                      = "${local.name_prefix}-mysql"
+  location                         = var.location
+  vnet_address_space               = var.mysql_flexible_server_network.vnet_address_space
+  private_endpoint_subnet_prefixes = var.mysql_flexible_server_network.private_endpoint_subnet_prefixes
+  mysql_version                    = var.mysql_flexible_server.version
+  sku_name                         = var.mysql_flexible_server.sku_name
+  lakeflow_connect_enabled         = local.mysql_flexible_server_lakeflow
+  tags                             = var.tags
+}
+
+module "mysql_flexible_server_workspace_peering" {
+  count  = var.features.workspace && var.features.mysql_flexible_server && var.mysql_flexible_server.workspace_peering_enabled ? 1 : 0
+  source = "../../modules/azure/vnet-peering"
+
+  name = "${local.name_prefix}-mysql"
+  local_vnet = {
+    id                  = module.workspace_network[0].vnet_id
+    name                = module.workspace_network[0].vnet_name
+    resource_group_name = module.workspace_network[0].resource_group_name
+  }
+  remote_vnet = {
+    id                  = module.mysql_flexible_server[0].vnet_id
+    name                = module.mysql_flexible_server[0].vnet_name
+    resource_group_name = module.mysql_flexible_server[0].resource_group_name
+  }
+  private_dns_zone_links = {
+    mysql = {
+      private_dns_zone_name = module.mysql_flexible_server[0].private_dns_zone_name
+      resource_group_name   = module.mysql_flexible_server[0].resource_group_name
+      virtual_network_id    = module.workspace_network[0].vnet_id
+    }
+  }
+  tags = var.tags
+}
+
+module "mysql_vm" {
+  count                    = var.features.mysql_vm ? 1 : 0
+  source                   = "../../modules/azure/mysql-vm"
+  name_prefix              = "${local.name_prefix}-mysqlvm"
+  location                 = var.location
+  vnet_address_space       = var.mysql_vm.vnet_address_space
+  vm_subnet_prefixes       = var.mysql_vm.vm_subnet_prefixes
+  vm_private_ip            = var.mysql_vm.vm_private_ip
+  lakeflow_connect_enabled = var.mysql_vm.lakeflow_connect_enabled
+  private_dns_name         = var.mysql_vm.private_dns_name
+  tags                     = var.tags
+}
+
+module "oracle_vm" {
+  count                    = var.features.oracle_vm ? 1 : 0
+  source                   = "../../modules/azure/oracle-vm"
+  name_prefix              = "${local.name_prefix}-oravm"
+  location                 = var.location
+  vnet_address_space       = var.oracle_vm.vnet_address_space
+  vm_subnet_prefixes       = var.oracle_vm.vm_subnet_prefixes
+  vm_private_ip            = var.oracle_vm.vm_private_ip
+  lakeflow_connect_enabled = var.oracle_vm.lakeflow_connect_enabled
+  private_dns_name         = var.oracle_vm.private_dns_name
+  tags                     = var.tags
+}
+
 locals {
-  sql_server_vm_lakeflow = var.features.sql_server_vm && var.sql_server_vm.lakeflow_connect_enabled
+  # The lab check job creates the replication user, so it needs the workspace.
+  mysql_flexible_server_lakeflow = var.features.mysql_flexible_server && var.features.workspace && var.mysql_flexible_server.lakeflow_connect_enabled
+  mysql_vm_lakeflow              = var.features.mysql_vm && var.mysql_vm.lakeflow_connect_enabled
+  oracle_vm_lakeflow             = var.features.oracle_vm && var.oracle_vm.lakeflow_connect_enabled
+  sql_server_vm_lakeflow         = var.features.sql_server_vm && var.sql_server_vm.lakeflow_connect_enabled
   # The lab check job creates the login, so it exists only with the workspace.
   sql_database_lakeflow = var.features.sql_database && var.features.workspace && var.sql_database.lakeflow_connect_enabled
-  key_vault_enabled     = var.key_vault.enabled && (var.features.sql_database || var.features.sql_server_vm)
+  key_vault_enabled = var.key_vault.enabled && anytrue([
+    var.features.sql_database, var.features.sql_server_vm, var.features.mysql_flexible_server, var.features.mysql_vm, var.features.oracle_vm,
+  ])
   key_vault_secret_names = concat(
     var.features.sql_database ? ["sql-database-admin-username", "sql-database-admin-password"] : [],
     local.sql_database_lakeflow ? ["sql-database-lakeflow-username", "sql-database-lakeflow-password"] : [],
     var.features.sql_server_vm ? ["sql-server-vm-sql-username", "sql-server-vm-sql-password", "sql-server-vm-admin-username", "sql-server-vm-admin-password"] : [],
     local.sql_server_vm_lakeflow ? ["sql-server-vm-lakeflow-username", "sql-server-vm-lakeflow-password"] : [],
+    var.features.mysql_flexible_server ? ["mysql-flexible-server-admin-username", "mysql-flexible-server-admin-password"] : [],
+    local.mysql_flexible_server_lakeflow ? ["mysql-flexible-server-lakeflow-username", "mysql-flexible-server-lakeflow-password"] : [],
+    var.features.mysql_vm ? ["mysql-vm-mysql-username", "mysql-vm-mysql-password", "mysql-vm-admin-username", "mysql-vm-admin-password"] : [],
+    local.mysql_vm_lakeflow ? ["mysql-vm-lakeflow-username", "mysql-vm-lakeflow-password"] : [],
+    var.features.oracle_vm ? ["oracle-vm-oracle-username", "oracle-vm-oracle-password", "oracle-vm-admin-username", "oracle-vm-admin-password"] : [],
+    local.oracle_vm_lakeflow ? ["oracle-vm-lakeflow-username", "oracle-vm-lakeflow-password"] : [],
   )
   key_vault_secrets = merge(
     var.features.sql_database ? {
@@ -202,6 +278,34 @@ locals {
     local.sql_server_vm_lakeflow ? {
       "sql-server-vm-lakeflow-username" = module.sql_server_vm[0].lakeflow_username
       "sql-server-vm-lakeflow-password" = module.sql_server_vm[0].lakeflow_password
+    } : {},
+    var.features.mysql_flexible_server ? {
+      "mysql-flexible-server-admin-username" = module.mysql_flexible_server[0].admin_username
+      "mysql-flexible-server-admin-password" = module.mysql_flexible_server[0].admin_password
+    } : {},
+    local.mysql_flexible_server_lakeflow ? {
+      "mysql-flexible-server-lakeflow-username" = module.mysql_flexible_server[0].lakeflow_username
+      "mysql-flexible-server-lakeflow-password" = module.mysql_flexible_server[0].lakeflow_password
+    } : {},
+    var.features.mysql_vm ? {
+      "mysql-vm-mysql-username" = module.mysql_vm[0].mysql_username
+      "mysql-vm-mysql-password" = module.mysql_vm[0].mysql_password
+      "mysql-vm-admin-username" = module.mysql_vm[0].vm_username
+      "mysql-vm-admin-password" = module.mysql_vm[0].vm_password
+    } : {},
+    local.mysql_vm_lakeflow ? {
+      "mysql-vm-lakeflow-username" = module.mysql_vm[0].lakeflow_username
+      "mysql-vm-lakeflow-password" = module.mysql_vm[0].lakeflow_password
+    } : {},
+    var.features.oracle_vm ? {
+      "oracle-vm-oracle-username" = module.oracle_vm[0].oracle_username
+      "oracle-vm-oracle-password" = module.oracle_vm[0].oracle_password
+      "oracle-vm-admin-username"  = module.oracle_vm[0].vm_username
+      "oracle-vm-admin-password"  = module.oracle_vm[0].vm_password
+    } : {},
+    local.oracle_vm_lakeflow ? {
+      "oracle-vm-lakeflow-username" = module.oracle_vm[0].lakeflow_username
+      "oracle-vm-lakeflow-password" = module.oracle_vm[0].lakeflow_password
     } : {},
   )
 }
@@ -234,16 +338,22 @@ locals {
         group_id    = "sqlServer"
       }
     } : {},
+    var.features.workspace && var.features.mysql_flexible_server && var.connectivity.mysql_flexible_server.serverless == "private_link" ? {
+      mysql_flexible_server = {
+        resource_id = module.mysql_flexible_server[0].server_id
+        group_id    = "mysqlServer"
+      }
+    } : {},
   )
 }
 
 # Derived from variables only: the workspace waits for the NCC, so the NCC must
 # not depend on anything that depends on the workspace.
 locals {
-  serverless_private_link_enabled = (
-    var.features.workspace && var.features.sql_database &&
-    var.connectivity.sql_database.serverless == "private_link"
-  )
+  serverless_private_link_enabled = var.features.workspace && anytrue([
+    var.features.sql_database && var.connectivity.sql_database.serverless == "private_link",
+    var.features.mysql_flexible_server && var.connectivity.mysql_flexible_server.serverless == "private_link",
+  ])
   network_connectivity_config_id = !local.serverless_private_link_enabled ? null : (
     var.existing_network_connectivity_config_id != null
     ? var.existing_network_connectivity_config_id
@@ -275,7 +385,7 @@ module "ncc" {
   workspace_id                   = tonumber(module.workspace[0].workspace_id)
   private_endpoint_rules         = local.serverless_private_endpoint_rules
 
-  depends_on = [module.sql_database]
+  depends_on = [module.sql_database, module.mysql_flexible_server]
 }
 
 moved {

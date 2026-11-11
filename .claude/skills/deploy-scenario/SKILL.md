@@ -31,6 +31,12 @@ offer the closest scenario.
 | AWS serverless compute to private SQL Server | `aws/serverless-sql-server` |
 | Azure serverless compute to private SQL Server | `azure/serverless-sql` |
 | Azure SQL from classic and serverless, with a test VM | `azure/workspace-sql-serverless-private-link` |
+| AWS serverless compute to private MySQL | `aws/serverless-mysql` |
+| AWS serverless compute to private Oracle | `aws/serverless-oracle` |
+| Azure serverless compute to MySQL Flexible Server | `azure/serverless-mysql` |
+| Azure MySQL VM ready for Lakeflow Connect, no path | `azure/workspace-mysql-vm-lakeflow-cdc` |
+| Azure Oracle VM ready for Lakeflow Connect, no path | `azure/workspace-oracle-vm-lakeflow-cdc` |
+| Azure SQL Server VM ready for Lakeflow Connect, no path | `azure/workspace-sql-server-vm-lakeflow-cdc` |
 
 If no target exists for the account, ask for the non-secret identifiers
 (account IDs, region, and for AWS SSO the start URL, SSO region, and role

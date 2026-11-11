@@ -45,7 +45,7 @@ Usage:
   ./infra setup <aws|azure> <environment.tfvars> [setup options]
   ./infra doctor <aws|azure> [<environment.tfvars>] [--json] [--wait <seconds>]
   ./infra validate <aws|azure>
-  ./infra plan <aws|azure> <environment.tfvars>
+  ./infra plan <aws|azure> <environment.tfvars> [--replace <resource address>]...
   ./infra apply <aws|azure> <environment.tfvars>
   ./infra verify <aws|azure> <environment.tfvars> [--json] [--endpoint-wait <seconds>]
   ./infra seed-access-plan azure <environment.tfvars> [--operator-ip <ipv4>]
@@ -55,6 +55,7 @@ Usage:
   ./infra destroy-plan <aws|azure> <environment.tfvars>
   ./infra destroy <aws|azure> <environment.tfvars> --confirm destroy-<cloud>
   ./infra state-migrate <aws|azure> <environment.tfvars> --confirm migrate-<cloud>-<deployment-id>
+  ./infra state-forget <aws|azure> <environment.tfvars> <resource address> --confirm forget-<cloud>-<deployment-id>
   ./infra endpoints aws status <environment.tfvars>
   ./infra endpoints aws accept <environment.tfvars> --service-id vpce-svc-... --endpoint-id vpce-...
   ./infra endpoints aws reject <environment.tfvars> --service-id vpce-svc-... --endpoint-id vpce-... --confirm reject-aws-endpoint
@@ -2233,6 +2234,12 @@ create_plan() {
   rm -f "$plan" "$metadata" "$plan.applied" "$plan.failed" "$metadata.failed" "$plan.summary.json"
   select_plan_stage "$action"
   local plan_args=(plan -var-file="$ENV_VARS" ${AUTH_TF_ARGS[@]+"${AUTH_TF_ARGS[@]}"} -out="$plan")
+  # --replace forces a resource the cloud left broken (for example a rejected
+  # private endpoint rule) to be recreated; it shows up as replace: below.
+  local address
+  for address in ${PLAN_REPLACE[@]+"${PLAN_REPLACE[@]}"}; do
+    plan_args+=("-replace=$address")
+  done
   [[ "$action" == "apply" ]] || plan_args=(plan -destroy "${plan_args[@]:1}")
   if ! terraform_logged "$([[ "$action" == "apply" ]] && echo plan || echo destroy-plan)" "${plan_args[@]}"; then
     rm -f "$plan"
@@ -2620,6 +2627,33 @@ seed_external_volume() {
   echo "Uploaded and verified $uploaded file(s). Review the lockdown plan, then run: ./infra apply azure $ENV_VARS"
 }
 
+# Removes one resource from a deployment's state without touching the cloud,
+# for objects the cloud already deleted but still reports (for example a
+# deactivated NCC private endpoint rule). Terraform keeps a state backup.
+forget_state() {
+  local cloud="$1" vars="$2" address="$3" confirmation="$4" expected address_pattern
+  prepare_environment "$cloud" "$vars"
+  check_legacy_state
+  bind_environment
+  expected="forget-$cloud-$ENV_ID"
+  [[ "$confirmation" == "$expected" ]] || die "state-forget requires: --confirm $expected"
+  address_pattern='^[][A-Za-z0-9_."-]+$'
+  [[ "$address" =~ $address_pattern ]] || die "invalid resource address: $address"
+  [[ -f "$ENV_STATE" ]] || die "state not found for deployment '$ENV_ID'"
+  acquire_operation_lock
+  terraform_for_environment init -backend=false -lockfile=readonly >/dev/null
+  local listed
+  listed="$(terraform_for_environment state list 2>&1)" || die "could not list the state: $listed"
+  if ! grep -Fxq -- "$address" <<< "$listed"; then
+    echo "State entries like it:" >&2
+    grep -F -- "$(sed -E 's/\[[^]]*\]//g; s/.*\.//' <<< "$address")" <<< "$listed" | sed 's/^/  /' >&2 || true
+    die "$address is not in the state of deployment '$ENV_ID'"
+  fi
+  terraform_for_environment state rm -- "$address"
+  release_operation_lock
+  echo "Removed $address from the state; nothing in the cloud was deleted. Plan again to recreate it: ./infra plan $cloud $DISPLAY_VARS"
+}
+
 migrate_state() {
   local cloud="$1" vars="$2" confirmation="$3"
   local legacy_state legacy_backup legacy_plan_path expected
@@ -2779,9 +2813,11 @@ verify_deployment() {
   results='[]'
   while IFS=$'\t' read -r task task_run; do
     [[ -n "$task" ]] || continue
-    output="$(databricks_workspace_cli "$workspace_url" jobs get-run-output "$task_run" --output json 2>/dev/null || echo '{}')"
-    results="$(jq -c --arg task "$task" --argjson run "$run" --argjson output "$output" --argjson lab "$lab" '
-      ($run.tasks[] | select(.task_key == $task)) as $state |
+    output="$(databricks_workspace_cli "$workspace_url" jobs get-run-output "$task_run" --output json 2>/dev/null || true)"
+    # A task still being retried can return an empty or partial body.
+    jq -e 'type == "object"' >/dev/null 2>&1 <<< "$output" || output='{}'
+    results="$(jq -c --arg task "$task" --arg task_run "$task_run" --argjson run "$run" --argjson output "$output" --argjson lab "$lab" '
+      ($run.tasks[] | select((.run_id | tostring) == $task_run)) as $state |
       ($lab.checks[$task] // {}) as $check |
       (($output.notebook_output.result // "") | fromjson? // {}) as $result |
       (($output.error // $state.state.state_message // "") |
@@ -2808,7 +2844,8 @@ verify_deployment() {
                 else (($output.error_trace // "") | gsub("\u001b\\[[0-9;]*m"; "") | split("\n") |
                       map(select(test("\\S"))) | .[-12:] | join("\n") | if . == "" then null else . end) end)
       }]' <<< "$results")"
-  done < <(jq -r '.tasks[]? | [.task_key, (.run_id | tostring)] | @tsv' <<< "$run")
+  # Retried tasks appear once per attempt; report the latest attempt of each.
+  done < <(jq -r '(.tasks // []) | group_by(.task_key) | map(max_by(.attempt_number // 0)) | .[] | [.task_key, (.run_id | tostring)] | @tsv' <<< "$run")
 
   status="$(jq -r 'if length > 0 and all(.[]; .status == "passed") then "passed" else "failed" end' <<< "$results")"
   summary="$(jq -n --arg cloud "$ENV_CLOUD" --arg id "$ENV_ID" --arg status "$status" --argjson run "$run" \
@@ -2915,7 +2952,16 @@ main() {
       "$ROOT/scripts/validate.sh" "$2"
       ;;
     plan)
-      [[ $# -eq 3 ]] || { usage; exit 2; }
+      [[ $# -ge 3 ]] || { usage; exit 2; }
+      PLAN_REPLACE=()
+      local_args=("${@:4}")
+      while [[ ${#local_args[@]} -gt 0 ]]; do
+        [[ "${local_args[0]}" == "--replace" && ${#local_args[@]} -ge 2 ]] || { usage; exit 2; }
+        address_pattern='^[][A-Za-z0-9_."-]+$'
+        [[ "${local_args[1]}" =~ $address_pattern ]] || die "invalid resource address for --replace: ${local_args[1]}"
+        PLAN_REPLACE+=("${local_args[1]}")
+        local_args=("${local_args[@]:2}")
+      done
       create_plan "$2" "$3" apply
       ;;
     apply)
@@ -2982,6 +3028,10 @@ main() {
     state-migrate)
       [[ $# -eq 5 && "$4" == "--confirm" ]] || die "state migration requires an environment-specific confirmation; see ./infra usage"
       migrate_state "$2" "$3" "$5"
+      ;;
+    state-forget)
+      [[ $# -eq 6 && "$5" == "--confirm" ]] || die "state-forget requires: <cloud> <environment.tfvars> <resource address> --confirm forget-<cloud>-<deployment-id>"
+      forget_state "$2" "$3" "$4" "$6"
       ;;
     endpoints)
       [[ "${2:-}" == "aws" || "${2:-}" == "azure" ]] || die "endpoint operations support aws or azure"

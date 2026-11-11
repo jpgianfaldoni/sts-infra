@@ -34,12 +34,17 @@ TARGET_TERRAFORM_FIELDS = {
     "azure": ("subscription_id", "tenant_id", "databricks_account_id", "location"),
 }
 # Sources whose lab check loads sample data; the others only connect.
-SEEDED_SOURCES = {"aws": {"rds_postgres", "rds_sql_server"}, "azure": {"sql_database"}}
+SEEDED_SOURCES = {"aws": {"rds_postgres", "rds_sql_server", "rds_mysql", "rds_oracle"}, "azure": {"sql_database", "mysql_flexible_server"}}
 # Sources the lab check job prepares for Lakeflow Connect: (option default,
 # change capture method). Defaults match deployments/<cloud>/variables.tf.
 LAKEFLOW_SOURCES = {
-    "aws": {"rds_postgres": (False, "logical replication"), "rds_sql_server": (True, "CDC")},
-    "azure": {"sql_database": (True, "change tracking")},
+    "aws": {
+        "rds_postgres": (False, "logical replication"),
+        "rds_sql_server": (True, "CDC"),
+        "rds_mysql": (True, "binary log replication"),
+        "rds_oracle": (True, "LogMiner CDC"),
+    },
+    "azure": {"sql_database": (True, "change tracking"), "mysql_flexible_server": (True, "binary log replication")},
 }
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -553,8 +558,8 @@ def source_paths(cloud, config, components):
         if "connectivity" not in component and "classic_path_option" not in component:
             continue
         classic = modes.get("classic", "none")
-        if cloud == "azure" and name == "sql_database":
-            classic = "peering" if config.get("sql_database", {}).get("workspace_peering_enabled") else "none"
+        if cloud == "azure" and component.get("classic_path_option"):
+            classic = "peering" if config.get(name, {}).get(component["classic_path_option"]) else "none"
         paths.append({"source": name, "compute": "classic", "mode": classic})
         paths.append({"source": name, "compute": "serverless", "mode": modes.get("serverless", "none")})
     return paths
@@ -570,9 +575,9 @@ def derived_components(cloud, config, paths):
             derived.add("transit_gateway")
     else:
         key_vault = config.get("key_vault", {})
-        if key_vault.get("enabled", True) and (enabled(config, "sql_database") or enabled(config, "sql_server_vm")):
+        if key_vault.get("enabled", True) and any(enabled(config, name) for name in ("sql_database", "sql_server_vm", "mysql_flexible_server", "mysql_vm", "oracle_vm")):
             derived.add("key_vault")
-        if enabled(config, "workspace") and active.get(("sql_database", "classic")) == "peering":
+        if enabled(config, "workspace") and "peering" in (active.get(("sql_database", "classic")), active.get(("mysql_flexible_server", "classic"))):
             derived.add("vnet_peering")
     if enabled(config, "workspace") and any(mode == "private_link" for (_, compute), mode in active.items() if compute == "serverless"):
         derived.add("ncc")
@@ -637,8 +642,10 @@ def analyze(cloud, config, manifest, explicit=None, target_name=None, target=Non
         method = lakeflow_method(cloud, config, source)
         if method and source in disconnected:
             finding("info", f"{source} gets its Lakeflow Connect {method} setup from the lab check job, which needs a classic or serverless path; with none, the setup does not run.")
-    if cloud == "azure" and enabled(config, "sql_server_vm") and config.get("sql_server_vm", {}).get("lakeflow_connect_enabled", True):
-        finding("info", "sql_server_vm is prepared for Lakeflow Connect CDC during apply, from inside the VM through Azure VM Run Command; it needs no network path.")
+    vm_setups = {"sql_server_vm": "CDC", "mysql_vm": "binary log replication", "oracle_vm": "LogMiner CDC"}
+    for name, method in vm_setups.items():
+        if cloud == "azure" and enabled(config, name) and config.get(name, {}).get("lakeflow_connect_enabled", True):
+            finding("info", f"{name} is prepared for Lakeflow Connect {method} during apply, from inside the VM through Azure VM Run Command; it needs no network path.")
     for name in built:
         component = components[name]
         if component.get("cost") == "high":

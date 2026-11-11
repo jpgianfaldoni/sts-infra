@@ -76,6 +76,8 @@ handles the browser logins, deploys, and verifies it. `AGENTS.md` and the
 | `glue_federation` | Private S3 sample data, Glue database and table, IAM roles, and optional Unity Catalog credentials, external location, connection, and foreign catalog |
 | `rds_postgres` | Private Amazon RDS for PostgreSQL |
 | `rds_sql_server` | Private Amazon RDS for SQL Server, suitable for Lakeflow Connect CDC labs |
+| `rds_mysql` | Private Amazon RDS for MySQL with row-based binary logging for Lakeflow Connect |
+| `rds_oracle` | Private Amazon RDS for Oracle (non-multitenant Standard Edition 2) prepared for Lakeflow Connect LogMiner CDC |
 | `aurora_postgres` | Private Aurora PostgreSQL cluster with writer and reader endpoints |
 | `aurora_proxy` | RDS Proxy for Aurora PostgreSQL |
 | `rabbitmq` | Private self-managed RabbitMQ on EC2 |
@@ -102,6 +104,9 @@ implicitly connect it to Databricks.
 | `custom_dns` | A DNS forwarder VM (forwarding to Azure DNS) in a dedicated subnet, set as the workspace VNet's custom DNS server |
 | `sql_database` | Private Azure SQL logical server and database with a private endpoint and private DNS |
 | `sql_server_vm` | Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise |
+| `mysql_flexible_server` | Private Azure Database for MySQL Flexible Server with a private endpoint and private DNS |
+| `mysql_vm` | MySQL on an Ubuntu VM, prepared for Lakeflow Connect from inside the VM |
+| `oracle_vm` | Oracle Database Free 23ai on an Oracle Linux VM, prepared for Lakeflow Connect from inside the VM |
 
 Serverless compute reaches Azure SQL through an NCC private endpoint
 (`connectivity.sql_database.serverless = "private_link"`), and classic compute

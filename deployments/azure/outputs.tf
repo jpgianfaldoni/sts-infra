@@ -89,6 +89,50 @@ output "sql_server_vm_password" {
   value       = try(module.sql_server_vm[0].sql_password, null)
   sensitive   = true
 }
+output "mysql_flexible_server" {
+  description = "Azure Database for MySQL Flexible Server connection details. Passwords are in the Key Vault named in the key_vault output."
+  value = var.features.mysql_flexible_server ? {
+    host                          = try(module.mysql_flexible_server[0].host, null)
+    port                          = try(module.mysql_flexible_server[0].port, null)
+    database                      = try(module.mysql_flexible_server[0].database_name, null)
+    username                      = try(module.mysql_flexible_server[0].admin_username, null)
+    server_id                     = try(module.mysql_flexible_server[0].server_id, null)
+    workspace_peering_enabled     = length(module.mysql_flexible_server_workspace_peering) > 0
+    lakeflow_username             = local.mysql_flexible_server_lakeflow ? "lakeflow" : null
+    lakeflow_password_secret_name = local.mysql_flexible_server_lakeflow && local.key_vault_enabled ? "mysql-flexible-server-lakeflow-password" : null
+  } : null
+}
+output "mysql_vm" {
+  description = "MySQL VM connection details and the Lakeflow Connect setup it reported. Passwords are in the Key Vault named in the key_vault output."
+  value = var.features.mysql_vm ? {
+    host                          = try(module.mysql_vm[0].host, null)
+    hostname                      = try(module.mysql_vm[0].hostname, null)
+    port                          = try(module.mysql_vm[0].port, null)
+    database                      = try(module.mysql_vm[0].database_name, null)
+    username                      = try(module.mysql_vm[0].mysql_username, null)
+    resource_group_name           = try(module.mysql_vm[0].resource_group_name, null)
+    vm_name                       = try(module.mysql_vm[0].vm_name, null)
+    lakeflow_username             = try(module.mysql_vm[0].lakeflow_username, null)
+    lakeflow_password_secret_name = local.mysql_vm_lakeflow && local.key_vault_enabled ? "mysql-vm-lakeflow-password" : null
+    setup                         = try(module.mysql_vm[0].setup, null)
+  } : null
+}
+output "oracle_vm" {
+  description = "Oracle VM connection details and the Lakeflow Connect setup it reported. The Lakeflow Connect connection uses the CDB$ROOT service name."
+  value = var.features.oracle_vm ? {
+    host                          = try(module.oracle_vm[0].host, null)
+    hostname                      = try(module.oracle_vm[0].hostname, null)
+    port                          = try(module.oracle_vm[0].port, null)
+    cdb_service_name              = try(module.oracle_vm[0].cdb_service_name, null)
+    pdb_service_name              = try(module.oracle_vm[0].pdb_service_name, null)
+    username                      = try(module.oracle_vm[0].oracle_username, null)
+    resource_group_name           = try(module.oracle_vm[0].resource_group_name, null)
+    vm_name                       = try(module.oracle_vm[0].vm_name, null)
+    lakeflow_username             = try(module.oracle_vm[0].lakeflow_username, null)
+    lakeflow_password_secret_name = local.oracle_vm_lakeflow && local.key_vault_enabled ? "oracle-vm-lakeflow-password" : null
+    setup                         = try(module.oracle_vm[0].setup, null)
+  } : null
+}
 output "key_vault" {
   description = "Key Vault holding the generated SQL credentials (names only), and the Key Vault-backed Databricks secret scope when one exists."
   value = local.key_vault_enabled ? {
