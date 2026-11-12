@@ -33,7 +33,7 @@ for each question:
 | Cloud | Not stated | No default: ask. |
 | Compute | "Databricks can reach X" without classic or serverless | Ask; explain that classic compute runs in the customer network and serverless compute runs in Databricks' account and needs Private Link. |
 | "Privately" | The path is not named | Classic: VPC/VNet peering (simplest). Serverless: Private Link (the only private option). Mention AWS classic PrivateLink when the user wants to practice endpoint services. |
-| Sample data | Not mentioned | Load it: `./infra verify` seeds `customers` and `orders` into PostgreSQL, RDS SQL Server, and Azure SQL. |
+| Sample data | Not mentioned | Load it: `./infra verify` seeds `customers` and `orders` into every database source with a path (PostgreSQL, SQL Server, MySQL, Oracle); the database VMs load it during apply. |
 | Region | Not stated | The target's region, else `us-west-2` (AWS) or `westus2` (Azure). |
 
 Clarify these phrasings instead of guessing:
