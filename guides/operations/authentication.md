@@ -27,7 +27,7 @@ default. Running setup again is a no-op when every session is valid.
 
 | Check | AWS | Azure |
 | --- | --- | --- |
-| `tools` | Terraform 1.11+, AWS CLI v2, Databricks CLI, jq, python3 | Terraform 1.11+, Azure CLI, Databricks CLI, jq, python3, curl |
+| `tools` | Terraform 1.11+, AWS CLI v2, Databricks CLI (and Python 3.9+ to run `./infra`) | Terraform 1.11+, Azure CLI, Databricks CLI (and Python 3.9+) |
 | `target` | only when the tfvars sets `target`: the target exists, is an AWS target, and agrees with any IDs the tfvars also sets | same, for an Azure target |
 | cloud | `aws sts get-caller-identity` for the selected profile, compared with the expected account | `az account show` plus a token request for the subscription, compared with the expected tenant |
 | `databricks_account` | an account-API call with the account profile | an account-API call with the Azure CLI identity or a mapped profile |

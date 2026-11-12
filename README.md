@@ -330,9 +330,11 @@ checklist.
   `deploy-scenario` skill.
 - `modules/` contains the reusable cloud components; `modules/shared` holds
   the ones both clouds use, such as the lab check job.
-- `lib/infra_scenario.py` implements `templates`, `new`, `explain`, `ls`,
-  `status`, and `targets`, and parses environment files for `./infra`
-  (Python standard library only).
+- `./infra` is a launcher for the Python package in `lib/sts_infra`
+  (authentication, saved plans, endpoint approval, verify, and state
+  operations); `lib/infra_scenario.py` implements `templates`, `new`,
+  `explain`, `ls`, `status`, and `targets` and parses environment files. Both
+  use the Python standard library only and need Python 3.9 or newer.
 - `guides/` contains networking explanations, tutorials, authentication, state,
   and deployment procedures.
 

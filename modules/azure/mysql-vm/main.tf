@@ -181,7 +181,7 @@ resource "azurerm_virtual_machine_run_command" "setup" {
   lifecycle {
     postcondition {
       condition     = try(self.instance_view[0].exit_code, 1) == 0
-      error_message = "MySQL setup failed on the VM. Read the LAKEFLOW_CDC_SETUP_FAILED line with: az vm run-command show --resource-group <rg> --vm-name <vm> --run-command-name mysql-setup --instance-view"
+      error_message = "MySQL setup failed on the VM. Read the LAKEFLOW_CDC_SETUP_FAILED line with: ./infra vm-setup-status azure <environment.tfvars>"
     }
   }
 }

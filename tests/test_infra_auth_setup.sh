@@ -216,6 +216,16 @@ case "${1:-} ${2:-}" in
         ;;
     esac
     ;;
+  "vm run-command")
+    case "$3" in
+      list) echo '[{"name":"oracle-setup"}]' ;;
+      show)
+        jq -cn --arg state "${TEST_RUN_COMMAND_STATE:-Failed}" '{name: "oracle-setup", instanceView: {executionState: $state,
+          exitCode: (if $state == "Succeeded" then 0 else 1 end),
+          output: "[t] Installing Oracle Database Free\nLAKEFLOW_CDC_SETUP_FAILED command failed at line 74: dbca", error: "su: invalid option"}}'
+        ;;
+    esac
+    ;;
   login*)
     printf 'az-login-env AZURE_CORE_LOGIN_EXPERIENCE_V2=%s\n' "${AZURE_CORE_LOGIN_EXPERIENCE_V2:-}" >> "$TEST_CALL_LOG"
     touch "$TEST_STATE_DIR/azure-login"
@@ -1069,5 +1079,25 @@ run TEST_OUTPUT_JSON='{"external_volume_storage": {"sensitive": false, "value": 
 expect_code 1 "seed without temporary access"
 expect_text "temporary seed access is not active" "inactive seed access not explained"
 pass "seed access is limited to one /32 and to the storage firewall changes"
+
+VM_STATE='{"version": 4, "outputs": {}, "resources": [{"mode": "managed", "type": "azurerm_linux_virtual_machine", "name": "oracle",
+  "module": "module.oracle_vm[0]", "instances": [{"attributes": {"name": "lab-oracle", "resource_group_name": "lab-oracle-rg"}}]}]}'
+echo "$VM_STATE" > "$ROOT/.state/azure/azure-lab/terraform.tfstate"
+reset_log
+run "$INFRA" vm-setup-status azure "$AZURE_VARS"
+expect_code 1 "vm-setup-status with a failed run command"
+expect_text "lab-oracle (resource group lab-oracle-rg):" "VM not reported"
+expect_text "  oracle-setup: Failed, exit 1" "run command state not reported"
+expect_text "    LAKEFLOW_CDC_SETUP_FAILED command failed at line 74: dbca" "failure line not reported"
+expect_text "      su: invalid option" "error output not reported"
+expect_log '^az vm run-command show --resource-group lab-oracle-rg --vm-name lab-oracle --run-command-name oracle-setup --instance-view --output json$'
+run TEST_RUN_COMMAND_STATE=Succeeded "$INFRA" vm-setup-status azure "$AZURE_VARS" --json
+expect_code 0 "vm-setup-status after success"
+expect_json '.vms[0].run_commands[0].state == "Succeeded" and .vms[0].run_commands[0].exit_code == 0' "vm-setup-status JSON changed"
+run "$INFRA" vm-setup-status aws "$AWS_VARS"
+expect_code 1 "vm-setup-status on AWS"
+expect_text "supports azure only" "AWS not explained"
+echo '{"version": 4, "outputs": {}, "resources": []}' > "$ROOT/.state/azure/azure-lab/terraform.tfstate"
+pass "vm-setup-status reads each database VM's run command without raw az calls"
 
 echo "infra CLI tests passed"
