@@ -269,11 +269,25 @@ def apply_plan(ctx: Context, cloud: str, vars_path: str, action: str) -> int:
     ctx.active_plan = ""
     with open(f"{plan}.applied", "w") as handle:
         handle.write(utc_now() + "\n")
+    if action == "destroy":
+        forget_workspace_profile(ctx)
     if action == "apply":
         if not endpoints.approve_after_apply(ctx):
             err(f"WARNING: automatic endpoint approval did not finish; review with ./infra endpoints {ctx.cloud} status {ctx.display_vars}")
         print_next_steps_after_apply(ctx)
     return 0
+
+
+def forget_workspace_profile(ctx: Context) -> None:
+    """The workspace is gone, so its profile must not be reused for the next workspace of this deployment."""
+    from . import authconfig
+
+    key = f"{ctx.cloud}/{ctx.id}"
+    profile = authconfig.deployment_value(key, "databricks_workspace_profile")
+    if not profile or ctx.state_workspace_url():
+        return
+    authconfig.forget_deployment_field(key, "databricks_workspace_profile")
+    out(f"Forgot workspace profile '{profile}' for {key}: its workspace was destroyed (the profile itself stays in the Databricks CLI config).")
 
 
 def print_next_steps_after_apply(ctx: Context) -> None:

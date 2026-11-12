@@ -122,11 +122,17 @@ def databricks_workspace_profile_state(ctx: Context, profile: str, workspace_url
 def workspace_accepts_account_credentials(ctx: Context, workspace_url: str) -> bool:
     """True when the account-level credentials also authenticate to the workspace."""
     quiet = {"stdout": "null", "stderr": "null"}
-    if ctx.db_mode == "profile":
-        if ctx.cloud != "aws":
-            return False
+    if ctx.db_mode == "profile" and ctx.cloud == "aws":
         code, _ = databricks_cli(ctx, "current-user", "me", "--profile", ctx.db_account_profile, "--output", "json",
                                  assign={"DATABRICKS_HOST": workspace_url}, **quiet)
+    elif ctx.db_auth_type == "azure-cli":
+        # Terraform and ./infra reach an Azure workspace with the Azure CLI
+        # identity when no workspace profile is set, even if the account APIs
+        # use a Databricks profile.
+        code, _ = databricks_cli(ctx, "current-user", "me", "--output", "json",
+                                 assign={"DATABRICKS_HOST": workspace_url, "DATABRICKS_AUTH_TYPE": "azure-cli"}, **quiet)
+    elif ctx.db_mode == "profile":
+        return False
     elif ctx.db_mode == "azure-cli":
         code, _ = databricks_cli(ctx, "current-user", "me", "--output", "json",
                                  assign={"DATABRICKS_HOST": workspace_url, "DATABRICKS_AUTH_TYPE": "azure-cli"}, **quiet)

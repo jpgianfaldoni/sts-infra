@@ -778,6 +778,14 @@ expect_code 0 "apply with an endpoint ID known only to Databricks"
 expect_log '^databricks account network-connectivity list-private-endpoint-rules ncc-1 '
 expect_log '^aws ec2 accept-vpc-endpoint-connections --service-id vpce-svc-1 --vpc-endpoint-ids vpce-live '
 expect_no_log 'accept-vpc-endpoint-connections .*vpce-stranger'
+# Terraform reports a not-yet-created endpoint as "" as well as null.
+rm -f "$TEST_STATE_DIR/accepted-vpce-live"
+run "$INFRA" plan aws "$AWS_VARS"
+reset_log
+run TEST_OUTPUT_JSON="${LIVE_PENDING_OUTPUT//\"endpoint_id\": null/\"endpoint_id\": \"\"}" TEST_AWS_CONNECTIONS="$LIVE_CONNECTIONS" STS_INFRA_WAIT_INTERVAL=0 "$INFRA" apply aws "$AWS_VARS"
+expect_code 0 "apply with an empty endpoint ID in state"
+expect_log '^databricks account network-connectivity list-private-endpoint-rules ncc-1 '
+expect_log '^aws ec2 accept-vpc-endpoint-connections --service-id vpce-svc-1 --vpc-endpoint-ids vpce-live '
 pass "connections from the shared Databricks role are accepted only when the rule names them"
 
 AZURE_MANUAL_VARS="$ROOT/environments/local/azure-manual.tfvars"
@@ -1099,5 +1107,62 @@ expect_code 1 "vm-setup-status on AWS"
 expect_text "supports azure only" "AWS not explained"
 echo '{"version": 4, "outputs": {}, "resources": []}' > "$ROOT/.state/azure/azure-lab/terraform.tfstate"
 pass "vm-setup-status reads each database VM's run command without raw az calls"
+
+# A workspace profile saved for an earlier, destroyed workspace must not reach
+# Terraform for the next one, and Azure needs no workspace login at all.
+AZURE_WS_VARS="$ROOT/environments/local/azure-ws.tfvars"
+cp "$AZURE_PROFILE_VARS" "$AZURE_WS_VARS"
+run "$INFRA" setup azure "$AZURE_WS_VARS" --yes --databricks-profile azure-databricks --workspace-profile stale-ws
+expect_code 0 "Azure setup that saves a workspace profile before the workspace exists"
+reset_log
+run "$INFRA" plan azure "$AZURE_WS_VARS"
+expect_code 0 "Azure plan before the workspace exists"
+expect_no_log 'plan .*-var=databricks_workspace_profile='
+pass "a workspace profile is not passed to Terraform before its workspace exists"
+
+mkdir -p "$ROOT/.state/azure/azure-ws"
+echo '{"version": 4, "outputs": {"workspace_url": {"value": "https://adb-1.azuredatabricks.net"}}, "resources": [
+  {"mode": "managed", "type": "databricks_catalog", "name": "this", "provider": "provider[\"registry.terraform.io/databricks/databricks\"].workspace", "instances": [{"attributes": {}}]}]}' \
+  > "$ROOT/.state/azure/azure-ws/terraform.tfstate"
+run "$INFRA" setup azure "$AZURE_WS_VARS" --yes --no-workspace-profile
+expect_code 0 "Azure setup --no-workspace-profile"
+jq -e '.deployments["azure/azure-ws"] | has("databricks_workspace_profile") | not' "$AUTH_CONFIG" >/dev/null || fail "workspace profile not forgotten"
+run "$INFRA" doctor azure "$AZURE_WS_VARS" --json
+expect_code 0 "Azure doctor with an account profile and no workspace profile"
+expect_json '.checks[3].status == "ok" and .checks[3].source == "account"' "Azure CLI identity not used for the workspace"
+run "$INFRA" setup aws "$AWS_VARS" --yes --no-workspace-profile
+expect_code 1 "--no-workspace-profile on AWS"
+expect_text "--no-workspace-profile is Azure only" "AWS use not refused"
+pass "Azure workspaces use the Azure CLI identity when no workspace profile is set"
+
+run "$INFRA" setup azure "$AZURE_WS_VARS" --yes --workspace-profile azure-ws-login --skip-workspace
+echo '{"version": 4, "outputs": {}, "resources": []}' > "$ROOT/.state/azure/azure-ws/terraform.tfstate"
+AZURE_WS_KEY=azure/azure-ws
+jq --arg key "$AZURE_WS_KEY" '.deployments[$key].databricks_workspace_profile = "old-ws"' "$AUTH_CONFIG" > "$AUTH_CONFIG.tmp" && mv "$AUTH_CONFIG.tmp" "$AUTH_CONFIG"
+chmod 600 "$AUTH_CONFIG"
+run "$INFRA" destroy-plan azure "$AZURE_WS_VARS"
+expect_code 0 "Azure destroy-plan"
+run "$INFRA" destroy azure "$AZURE_WS_VARS" --confirm destroy-azure
+expect_code 0 "Azure destroy"
+expect_text "Forgot workspace profile 'old-ws' for azure/azure-ws" "destroy did not report the forgotten profile"
+jq -e '.deployments["azure/azure-ws"] | has("databricks_workspace_profile") | not' "$AUTH_CONFIG" >/dev/null || fail "destroy kept the workspace profile"
+pass "destroy forgets the profile of the workspace it removed"
+
+mkdir -p "$ROOT/.state/aws/aws-second"
+echo '{"version": 4, "outputs": {"workspace_url": {"value": "https://dbc-second.cloud.databricks.com"}}, "resources": [{"mode": "managed",
+  "type": "databricks_mws_workspaces", "name": "this", "instances": [{"attributes": {"workspace_id": 7}}]}]}' > "$ROOT/.state/aws/aws-second/terraform.tfstate"
+run "$INFRA" setup aws "$SECOND_VARS" --yes --skip-workspace
+jq '.deployments["aws/aws-second"].databricks_workspace_profile = "old-ws"' "$AUTH_CONFIG" > "$AUTH_CONFIG.tmp" && mv "$AUTH_CONFIG.tmp" "$AUTH_CONFIG"
+chmod 600 "$AUTH_CONFIG"
+reset_log
+run "$INFRA" setup aws "$SECOND_VARS" --yes
+expect_code 0 "setup with a saved profile for a destroyed workspace"
+expect_text "Saved workspace profile 'old-ws' targets another workspace" "stale profile not explained"
+expect_log '^databricks auth login --host https://dbc-second.cloud.databricks.com --profile sts-aws-second-workspace$'
+jq -e '.deployments["aws/aws-second"].databricks_workspace_profile == "sts-aws-second-workspace"' "$AUTH_CONFIG" >/dev/null || fail "new workspace profile not saved"
+[[ "$(jq -r .host "$TEST_STATE_DIR/db/old-ws.json")" == "https://dbc-old.cloud.databricks.com" ]] || fail "the old profile was overwritten"
+run "$INFRA" setup aws "$SECOND_VARS" --yes --workspace-profile old-ws
+expect_code 11 "setup with an explicit profile for another workspace"
+pass "setup replaces a saved profile for a destroyed workspace without overwriting it"
 
 echo "infra CLI tests passed"

@@ -172,6 +172,13 @@ such as metastores. If it is not, map a separate OAuth profile:
 Use `--no-databricks-profile` to switch an existing mapping back to the Azure
 CLI identity.
 
+The workspace also uses the Azure CLI identity, through the workspace resource
+ID, even when the account APIs use a Databricks profile; a workspace profile is
+optional (`--workspace-profile <name>`). `--no-workspace-profile` removes a
+saved one. A workspace profile is passed to Terraform only once its workspace
+exists, and destroy forgets it, so a later workspace of the same deployment
+never inherits a profile for the deleted one.
+
 ## The local mapping
 
 Setup saves non-secret identifiers to `~/.config/sts-infra/auth.json`

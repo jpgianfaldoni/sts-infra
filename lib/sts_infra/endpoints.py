@@ -53,13 +53,15 @@ def aws_accept_serverless_endpoints(ctx: Context) -> bool:
     out("Accepting the serverless NCC endpoint connections this deployment requested (endpoint_approval = \"auto\").")
     deadline = time.time() + env_int("STS_INFRA_ENDPOINT_WAIT", 600)
     while True:
-        if ncc and any(item.get("endpoint_id") is None for item in pending):
+        # Terraform reports an endpoint Databricks has not created yet as null
+        # or as "", so both mean "ask the account API".
+        if ncc and any(not item.get("endpoint_id") for item in pending):
             code, text = clis.databricks_account_cli(ctx, "account", "network-connectivity", "list-private-endpoint-rules", ncc, "--output", "json", stderr="null")
             listed = parse_json(text) if code == 0 else None
             if listed is not None:
                 live = items_of(listed, "items", "rules")
                 for item in pending:
-                    if item.get("endpoint_id") is None:
+                    if not item.get("endpoint_id"):
                         rule_id = rules.get(item.get("component"))
                         item["endpoint_id"] = next((r.get("vpc_endpoint_id") for r in live if isinstance(r, dict) and r.get("rule_id") == rule_id and r.get("vpc_endpoint_id")), None)
         waiting = 0

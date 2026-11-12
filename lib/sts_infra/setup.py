@@ -14,7 +14,7 @@ from .common import EXIT_IDENTITY_MISMATCH, EXIT_LOGIN_REQUIRED, EXIT_MISSING_TO
 from .context import Context, tool_available
 
 FLAGS = {"--yes": "assume_yes", "-y": "assume_yes", "--no-databricks-profile": "no_databricks_profile", "--skip-workspace": "skip_workspace",
-         "--workspace-login": "workspace_login", "--device-code": "device_code", "--force-login": "force_login"}
+         "--workspace-login": "workspace_login", "--no-workspace-profile": "no_workspace_profile", "--device-code": "device_code", "--force-login": "force_login"}
 VALUES = {"--aws-profile": "aws_profile", "--aws-account-id": "aws_account_id", "--sso-start-url": "sso_start_url", "--sso-region": "sso_region",
           "--sso-role-name": "sso_role_name", "--sso-session": "sso_session", "--databricks-profile": "databricks_profile",
           "--workspace-profile": "workspace_profile", "--tenant": "tenant"}
@@ -104,16 +104,33 @@ def ensure_databricks_account_profile(ctx: Context, profile: str, probe: str) ->
         die(f"Databricks account session verification failed for profile '{profile}'", EXIT_LOGIN_REQUIRED)
 
 
+def profile_fits(ctx: Context, name: str, workspace_url: str) -> bool:
+    """True when the profile does not exist yet or already targets this workspace."""
+    entry = clis.databricks_profile_entry(ctx, name)
+    return entry is None or clis.normalize_host(entry.get("host") or "") == clis.normalize_host(workspace_url)
+
+
+def unused_workspace_profile_name(ctx: Context, workspace_url: str) -> str:
+    deployment = ctx.id[len("sts-"):] if ctx.id.startswith("sts-") else ctx.id
+    base = f"sts-{deployment}-workspace"
+    for suffix in [""] + [f"-{n}" for n in range(2, 100)]:
+        if profile_fits(ctx, base + suffix, workspace_url):
+            return base + suffix
+    return base
+
+
 def setup_workspace_profile(ctx: Context, options: Options, workspace_url: str) -> str:
     """The chosen workspace profile, or '' when the account-level credentials already work there."""
     default = options.workspace_profile or ctx.db_workspace_profile
     if not default and not options.workspace_login and clis.workspace_accepts_account_credentials(ctx, workspace_url):
         err(f"Databricks workspace: {workspace_url} accepts the account-level credentials; no separate login is needed.")
         return ""
-    default = default or clis.discover_workspace_profile(ctx, workspace_url)
-    if not default:
-        deployment = ctx.id[len("sts-"):] if ctx.id.startswith("sts-") else ctx.id
-        default = f"sts-{deployment}-workspace"
+    if default and not options.workspace_profile and not profile_fits(ctx, default, workspace_url):
+        # A saved profile for an earlier, destroyed workspace of this
+        # deployment: leave it alone and pick a name that fits this workspace.
+        err(f"Saved workspace profile '{default}' targets another workspace; choosing a new profile for {workspace_url}.")
+        default = ""
+    default = default or clis.discover_workspace_profile(ctx, workspace_url) or unused_workspace_profile_name(ctx, workspace_url)
     name = choose_value(options, "Databricks workspace profile", default, "--workspace-profile")
     state = clis.databricks_workspace_profile_state(ctx, name, workspace_url)
     if state.state == "mismatch":
@@ -257,7 +274,10 @@ def setup_azure(ctx: Context, vars_path: str, options: Options) -> None:
                     "or pass --databricks-profile <name> to use a separate Databricks OAuth login.", EXIT_IDENTITY_MISMATCH)
             out("Databricks account: verified with the Azure CLI identity (no separate Databricks login needed)")
 
-    if options.skip_workspace:
+    if options.no_workspace_profile:
+        workspace_profile = ""
+        out("Databricks workspace: uses the Azure CLI identity through the workspace resource ID (saved workspace profile removed).")
+    elif options.skip_workspace:
         workspace_profile = ctx.db_workspace_profile
     elif options.workspace_profile or ctx.db_workspace_profile:
         if ctx.workspace_url:
@@ -280,6 +300,8 @@ def setup_azure(ctx: Context, vars_path: str, options: Options) -> None:
 
 def setup_command(ctx: Context, cloud: str, vars_path: str, args) -> None:
     options = Options(args)
+    if options.no_workspace_profile and cloud != "azure":
+        die("--no-workspace-profile is Azure only: AWS workspaces need their own OAuth login")
     if cloud == "aws":
         setup_aws(ctx, vars_path, options)
     else:

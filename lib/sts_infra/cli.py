@@ -57,6 +57,7 @@ Setup options (setup asks no questions with --yes or when stdin is not a termina
   --no-databricks-profile      Azure only: use the Azure CLI identity for account APIs
   --workspace-profile <name>   Databricks workspace profile to use or create
   --skip-workspace             do not set up workspace authentication
+  --no-workspace-profile       Azure only: forget the saved workspace profile and use the Azure CLI identity
   --workspace-login            log in to the workspace even when no check requires it yet
   --tenant <id>                Azure only: Entra tenant for az login
   --device-code                use device-code login for AWS and Azure

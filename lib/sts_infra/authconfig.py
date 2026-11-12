@@ -124,6 +124,15 @@ def save_deployment(deployment_key: str, pairs) -> None:
     _write(lambda data: data["deployments"].__setitem__(deployment_key, entry))
 
 
+def forget_deployment_field(deployment_key: str, field: str) -> None:
+    def update(data):
+        entry = data["deployments"].get(deployment_key)
+        if isinstance(entry, dict):
+            entry.pop(field, None)
+
+    _write(update)
+
+
 def save_account(account_key: str, field: str, value: str) -> None:
     """Remember a profile for an account so other environments resolve it without setup."""
     if not value:

@@ -565,6 +565,9 @@ def run_auth_checks(ctx: Context, action: str = "check") -> None:
 
 
 def build_terraform_context(ctx: Context) -> None:
+    # A workspace profile is passed only once the workspace exists: a profile
+    # saved for an earlier, destroyed workspace of the same deployment would
+    # otherwise point Terraform at the wrong workspace.
     # Resource names default to the deployment ID when tfvars omit name_prefix.
     args = [f"-var=deployment_id={ctx.id}"]
     if ctx.target:
@@ -577,7 +580,7 @@ def build_terraform_context(ctx: Context) -> None:
             args.append(f"-var=aws_profile={ctx.aws_profile}")
         if ctx.db_mode == "profile":
             args.append(f"-var=databricks_profile={ctx.db_account_profile}")
-        if ctx.db_workspace_profile:
+        if ctx.db_workspace_profile and ctx.workspace_url:
             args.append(f"-var=databricks_workspace_profile={ctx.db_workspace_profile}")
         context = (f"cloud=aws\naws_account={ctx.aws_account}\naws_principal={ctx.aws_arn}\naws_profile={ctx.aws_profile}\n"
                    f"aws_region={ctx.aws_region}\ndatabricks_account={ctx.db_account_id}\ndatabricks_mode={ctx.db_mode}\n"
@@ -588,7 +591,7 @@ def build_terraform_context(ctx: Context) -> None:
             args.append(f"-var=tenant_id={ctx.az_tenant}")
         if ctx.db_mode == "profile":
             args.append(f"-var=databricks_account_profile={ctx.db_account_profile}")
-        if ctx.db_workspace_profile:
+        if ctx.db_workspace_profile and ctx.workspace_url:
             args.append(f"-var=databricks_workspace_profile={ctx.db_workspace_profile}")
         if ctx.db_auth_type:
             args.append(f"-var=databricks_auth_type={ctx.db_auth_type}")
