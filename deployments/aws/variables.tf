@@ -195,6 +195,37 @@ variable "glue_federation" {
     error_message = "Glue federation Databricks connectivity requires the glue_federation, workspace, and unity_catalog features."
   }
 }
+variable "rds_mysql" {
+  description = "RDS for MySQL engine and Lakeflow Connect source configuration."
+  type = object({
+    # MySQL major version; also the parameter group family (mysql<version>).
+    engine_version = optional(string, "8.4")
+    instance_class = optional(string, "db.t4g.micro")
+    # The lab check job sets binary log retention and creates a lakeflow
+    # replication user, so Lakeflow Connect can ingest the sample tables.
+    lakeflow_connect_enabled = optional(bool, true)
+  })
+  default = {}
+}
+variable "rds_oracle" {
+  description = "RDS for Oracle engine and Lakeflow Connect source configuration."
+  type = object({
+    # Non-multitenant (non-CDB) engine: Lakeflow Connect does not support
+    # multitenant RDS for Oracle. oracle-se2 is license-included.
+    engine         = optional(string, "oracle-se2")
+    engine_version = optional(string, "19")
+    instance_class = optional(string, "db.m5.large")
+    # The lab check job turns on supplemental logging and log retention, and
+    # creates a LAKEFLOW user with the Databricks setup package.
+    lakeflow_connect_enabled = optional(bool, true)
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["oracle-se2", "oracle-ee"], var.rds_oracle.engine)
+    error_message = "rds_oracle.engine must be a non-CDB engine: oracle-se2 or oracle-ee."
+  }
+}
 variable "rds_sql_server" {
   description = "RDS SQL Server Lakeflow Connect source configuration."
   type = object({
@@ -226,6 +257,8 @@ variable "features" {
     glue_federation   = optional(bool, false)
     rds_postgres      = optional(bool, false)
     rds_sql_server    = optional(bool, false)
+    rds_mysql         = optional(bool, false)
+    rds_oracle        = optional(bool, false)
     aurora_postgres   = optional(bool, false)
     aurora_proxy      = optional(bool, false)
     rabbitmq          = optional(bool, false)
@@ -247,6 +280,14 @@ variable "connectivity" {
       serverless = optional(string, "none")
     }), {})
     rds_sql_server = optional(object({
+      classic    = optional(string, "none")
+      serverless = optional(string, "none")
+    }), {})
+    rds_mysql = optional(object({
+      classic    = optional(string, "none")
+      serverless = optional(string, "none")
+    }), {})
+    rds_oracle = optional(object({
       classic    = optional(string, "none")
       serverless = optional(string, "none")
     }), {})
@@ -273,6 +314,8 @@ variable "connectivity" {
     condition = alltrue([for value in [
       var.connectivity.rds_postgres.classic,
       var.connectivity.rds_sql_server.classic,
+      var.connectivity.rds_mysql.classic,
+      var.connectivity.rds_oracle.classic,
       var.connectivity.aurora_postgres.classic,
       var.connectivity.rabbitmq.classic,
       var.connectivity.kafka.classic
@@ -283,6 +326,8 @@ variable "connectivity" {
     condition = alltrue([for value in [
       var.connectivity.rds_postgres.serverless,
       var.connectivity.rds_sql_server.serverless,
+      var.connectivity.rds_mysql.serverless,
+      var.connectivity.rds_oracle.serverless,
       var.connectivity.aurora_postgres.serverless,
       var.connectivity.rabbitmq.serverless,
       var.connectivity.kafka.serverless
@@ -303,6 +348,10 @@ variable "connectivity" {
       var.connectivity.rds_postgres.serverless,
       var.connectivity.rds_sql_server.classic,
       var.connectivity.rds_sql_server.serverless,
+      var.connectivity.rds_mysql.classic,
+      var.connectivity.rds_mysql.serverless,
+      var.connectivity.rds_oracle.classic,
+      var.connectivity.rds_oracle.serverless,
       var.connectivity.aurora_postgres.classic,
       var.connectivity.aurora_postgres.serverless,
       var.connectivity.rabbitmq.classic,
@@ -318,6 +367,8 @@ variable "connectivity" {
     condition = alltrue([
       var.features.rds_postgres || (var.connectivity.rds_postgres.classic == "none" && var.connectivity.rds_postgres.serverless == "none"),
       var.features.rds_sql_server || (var.connectivity.rds_sql_server.classic == "none" && var.connectivity.rds_sql_server.serverless == "none"),
+      var.features.rds_mysql || (var.connectivity.rds_mysql.classic == "none" && var.connectivity.rds_mysql.serverless == "none"),
+      var.features.rds_oracle || (var.connectivity.rds_oracle.classic == "none" && var.connectivity.rds_oracle.serverless == "none"),
       var.features.aurora_postgres || (var.connectivity.aurora_postgres.classic == "none" && var.connectivity.aurora_postgres.serverless == "none"),
       var.features.rabbitmq || (var.connectivity.rabbitmq.classic == "none" && var.connectivity.rabbitmq.serverless == "none"),
       var.features.kafka || (var.connectivity.kafka.classic == "none" && var.connectivity.kafka.serverless == "none"),
@@ -363,12 +414,16 @@ variable "database_networks" {
     aurora_postgres = string
     rabbitmq        = string
     kafka           = optional(string, "10.48.0.0/16")
+    rds_mysql       = optional(string, "10.49.0.0/16")
+    rds_oracle      = optional(string, "10.51.0.0/16")
   })
   default = { rds_postgres = "10.45.0.0/16"
     rds_sql_server  = "10.43.0.0/16"
     aurora_postgres = "10.46.0.0/16"
     rabbitmq        = "10.47.0.0/16"
     kafka           = "10.48.0.0/16"
+    rds_mysql       = "10.49.0.0/16"
+    rds_oracle      = "10.51.0.0/16"
   }
 }
 

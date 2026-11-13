@@ -14,4 +14,9 @@ variable "private_endpoint_rules" {
     group_id    = string
   }))
   default = {}
+
+  validation {
+    condition     = alltrue([for key in keys(var.private_endpoint_rules) : contains(["sql_database", "mysql_flexible_server"], key)])
+    error_message = "Each private endpoint rule key must be a source this module creates a rule resource for; add a resource for a new source."
+  }
 }

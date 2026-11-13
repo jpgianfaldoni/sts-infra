@@ -208,6 +208,108 @@
             }
           }
         },
+        "rds_mysql": {
+          "summary": "Private Amazon RDS for MySQL in its own VPC with row-based binary logging for Lakeflow Connect, with sample tables loaded by ./infra verify",
+          "module": "rds-mysql",
+          "feature": "features.rds_mysql",
+          "dependencies": [],
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.rds_mysql.classic",
+              "modes": [
+                "none",
+                "peering",
+                "private_link"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.rds_mysql.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "engine_version": {
+              "path": "rds_mysql.engine_version",
+              "type": "string",
+              "default": "8.4",
+              "description": "MySQL major version; also selects the parameter group family (mysql<version>)."
+            },
+            "instance_class": {
+              "path": "rds_mysql.instance_class",
+              "type": "string",
+              "default": "db.t4g.micro",
+              "description": "RDS instance class."
+            },
+            "lakeflow_connect_enabled": {
+              "path": "rds_mysql.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Store a lakeflow replication user in Secrets Manager; ./infra verify's lab check job sets seven-day binary log retention, creates the user, and grants replication and table access. Needs a classic or serverless path."
+            }
+          },
+          "minutes": 15,
+          "cost": "low",
+          "cost_note": "db.t4g.micro"
+        },
+        "rds_oracle": {
+          "summary": "Private Amazon RDS for Oracle (non-multitenant, license-included Standard Edition 2) in its own VPC, prepared for Lakeflow Connect LogMiner CDC, with sample tables loaded by ./infra verify",
+          "module": "rds-oracle",
+          "feature": "features.rds_oracle",
+          "dependencies": [],
+          "connectivity": {
+            "classic": {
+              "path": "connectivity.rds_oracle.classic",
+              "modes": [
+                "none",
+                "peering",
+                "private_link"
+              ]
+            },
+            "serverless": {
+              "path": "connectivity.rds_oracle.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "engine": {
+              "path": "rds_oracle.engine",
+              "type": "string",
+              "default": "oracle-se2",
+              "description": "Non-CDB engine: oracle-se2 (license-included) or oracle-ee. Lakeflow Connect does not support multitenant RDS for Oracle.",
+              "allowed": [
+                "oracle-se2",
+                "oracle-ee"
+              ]
+            },
+            "engine_version": {
+              "path": "rds_oracle.engine_version",
+              "type": "string",
+              "default": "19",
+              "description": "Oracle version; 19 selects the latest 19c release update."
+            },
+            "instance_class": {
+              "path": "rds_oracle.instance_class",
+              "type": "string",
+              "default": "db.m5.large",
+              "description": "RDS instance class."
+            },
+            "lakeflow_connect_enabled": {
+              "path": "rds_oracle.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Store a LAKEFLOW user in Secrets Manager; ./infra verify's lab check job sets 48-hour archive log retention, turns on supplemental logging, and creates the user with the Databricks Oracle setup package. Needs a classic or serverless path."
+            }
+          },
+          "minutes": 30,
+          "cost": "high",
+          "cost_note": "Oracle Standard Edition 2 license-included instance bills hourly"
+        },
         "aurora_postgres": {
           "summary": "Private Aurora PostgreSQL cluster with writer and reader endpoints in its own VPC",
           "module": "aurora-postgres",
@@ -684,6 +786,97 @@
           "minutes": 20,
           "cost": "high",
           "cost_note": "SQL Server VM license bills hourly"
+        },
+        "mysql_flexible_server": {
+          "summary": "Private Azure Database for MySQL Flexible Server with a private endpoint and private DNS, with sample tables loaded by ./infra verify and binary logging for Lakeflow Connect",
+          "module": "mysql-flexible-server",
+          "feature": "features.mysql_flexible_server",
+          "dependencies": [],
+          "connectivity": {
+            "serverless": {
+              "path": "connectivity.mysql_flexible_server.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "options": {
+            "workspace_peering_enabled": {
+              "path": "mysql_flexible_server.workspace_peering_enabled",
+              "type": "bool",
+              "default": false,
+              "description": "Peer the MySQL VNet with the workspace VNet and link its private DNS zone for classic compute."
+            },
+            "version": {
+              "path": "mysql_flexible_server.version",
+              "type": "string",
+              "default": "8.4",
+              "description": "MySQL version."
+            },
+            "sku_name": {
+              "path": "mysql_flexible_server.sku_name",
+              "type": "string",
+              "default": "B_Standard_B1ms",
+              "description": "Flexible Server compute SKU."
+            },
+            "lakeflow_connect_enabled": {
+              "path": "mysql_flexible_server.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Set seven-day binary log retention and full row images, and store a lakeflow replication user in Key Vault; ./infra verify's lab check job creates the user and its grants. Needs a path and the Key Vault-backed scope."
+            }
+          },
+          "minutes": 15,
+          "cost": "low",
+          "cost_note": "Burstable B1ms",
+          "classic_path_option": "workspace_peering_enabled"
+        },
+        "mysql_vm": {
+          "summary": "MySQL 8.0 on an Ubuntu VM in its own VNet, prepared for Lakeflow Connect from inside the VM (binary logging, sample tables, replication user); no network path from Databricks",
+          "module": "mysql-vm",
+          "feature": "features.mysql_vm",
+          "dependencies": [],
+          "options": {
+            "lakeflow_connect_enabled": {
+              "path": "mysql_vm.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Through Azure VM Run Command (no network path needed), turn on row-based binary logging with seven-day retention, load the sample tables, and create a lakeflow replication user."
+            },
+            "private_dns_name": {
+              "path": "mysql_vm.private_dns_name",
+              "type": "string",
+              "default": null,
+              "description": "Private hostname, such as mysql.lab.internal, resolved inside the VM's VNet; it adds no network path."
+            }
+          },
+          "minutes": 10,
+          "cost": "low",
+          "cost_note": "Standard_D2s_v5 VM and NAT gateway"
+        },
+        "oracle_vm": {
+          "summary": "Oracle Database Free 23ai on an Oracle Linux VM in its own VNet, prepared for Lakeflow Connect LogMiner CDC from inside the VM; no network path from Databricks",
+          "module": "oracle-vm",
+          "feature": "features.oracle_vm",
+          "dependencies": [],
+          "options": {
+            "lakeflow_connect_enabled": {
+              "path": "oracle_vm.lakeflow_connect_enabled",
+              "type": "bool",
+              "default": true,
+              "description": "Through Azure VM Run Command (no network path needed), turn on ARCHIVELOG mode and supplemental logging, load the sample tables into FREEPDB1, and create a C##LAKEFLOW common user with the Databricks Oracle setup package."
+            },
+            "private_dns_name": {
+              "path": "oracle_vm.private_dns_name",
+              "type": "string",
+              "default": null,
+              "description": "Private hostname, such as oracle.lab.internal, resolved inside the VM's VNet; it adds no network path."
+            }
+          },
+          "minutes": 40,
+          "cost": "medium",
+          "cost_note": "Standard_D2s_v5 VM and NAT gateway; Oracle Database Free needs no license"
         },
         "ncc": {
           "summary": "Network Connectivity Configuration with a private endpoint rule to each source serverless compute reaches over Private Link",

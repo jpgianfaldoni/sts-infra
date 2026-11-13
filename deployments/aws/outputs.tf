@@ -78,6 +78,26 @@ output "rds_sql_server" {
     lakeflow_secret_arn = module.rds_sql_server[0].lakeflow_secret_arn
   }, null)
 }
+
+output "rds_mysql" {
+  value = try({ host = module.rds_mysql[0].host
+    port                = module.rds_mysql[0].port
+    database            = module.rds_mysql[0].database_name
+    username            = module.rds_mysql[0].master_username
+    secret_arn          = module.rds_mysql[0].master_secret_arn
+    lakeflow_secret_arn = module.rds_mysql[0].lakeflow_secret_arn
+  }, null)
+}
+output "rds_oracle" {
+  description = "RDS for Oracle connection details; service_name is what clients and the Lakeflow Connect connection use."
+  value = try({ host = module.rds_oracle[0].host
+    port                = module.rds_oracle[0].port
+    service_name        = module.rds_oracle[0].database_name
+    username            = module.rds_oracle[0].master_username
+    secret_arn          = module.rds_oracle[0].master_secret_arn
+    lakeflow_secret_arn = module.rds_oracle[0].lakeflow_secret_arn
+  }, null)
+}
 output "aurora_postgres" {
   value = try({ reader = module.aurora_postgres[0].reader_endpoint
     proxy_reader = module.aurora_postgres[0].proxy_read_only_endpoint
@@ -145,6 +165,32 @@ output "connectivity" {
         host                = var.connectivity.rds_sql_server.serverless == "private_link" ? try(module.rds_sql_server[0].host, null) : null
       }
     }
+    rds_mysql = {
+      classic = {
+        mode                = var.connectivity.rds_mysql.classic
+        host                = var.connectivity.rds_mysql.classic == "private_link" ? try(module.rds_mysql_classic_private_link[0].dns_name, null) : var.connectivity.rds_mysql.classic == "peering" ? try(module.rds_mysql[0].host, null) : null
+        endpoint_id         = try(module.rds_mysql_classic_private_link[0].endpoint_id, null)
+        endpoint_service_id = var.connectivity.rds_mysql.classic == "private_link" ? try(module.rds_mysql[0].endpoint_service_id, null) : null
+      }
+      serverless = {
+        mode                = var.connectivity.rds_mysql.serverless
+        endpoint_service_id = var.connectivity.rds_mysql.serverless == "private_link" ? try(module.rds_mysql[0].endpoint_service_id, null) : null
+        host                = var.connectivity.rds_mysql.serverless == "private_link" ? try(module.rds_mysql[0].host, null) : null
+      }
+    }
+    rds_oracle = {
+      classic = {
+        mode                = var.connectivity.rds_oracle.classic
+        host                = var.connectivity.rds_oracle.classic == "private_link" ? try(module.rds_oracle_classic_private_link[0].dns_name, null) : var.connectivity.rds_oracle.classic == "peering" ? try(module.rds_oracle[0].host, null) : null
+        endpoint_id         = try(module.rds_oracle_classic_private_link[0].endpoint_id, null)
+        endpoint_service_id = var.connectivity.rds_oracle.classic == "private_link" ? try(module.rds_oracle[0].endpoint_service_id, null) : null
+      }
+      serverless = {
+        mode                = var.connectivity.rds_oracle.serverless
+        endpoint_service_id = var.connectivity.rds_oracle.serverless == "private_link" ? try(module.rds_oracle[0].endpoint_service_id, null) : null
+        host                = var.connectivity.rds_oracle.serverless == "private_link" ? try(module.rds_oracle[0].host, null) : null
+      }
+    }
     aurora_postgres = {
       classic = {
         mode                = var.connectivity.aurora_postgres.classic
@@ -208,6 +254,8 @@ locals {
   endpoint_service_ids = {
     rds_postgres      = try(module.rds_postgres[0].endpoint_service_id, null)
     rds_sql_server    = try(module.rds_sql_server[0].endpoint_service_id, null)
+    rds_mysql         = try(module.rds_mysql[0].endpoint_service_id, null)
+    rds_oracle        = try(module.rds_oracle[0].endpoint_service_id, null)
     aurora_postgres   = try(module.aurora_postgres[0].endpoint_service_id, null)
     rabbitmq          = try(module.rabbitmq[0].endpoint_service_id, null)
     kafka             = try(module.kafka[0].endpoint_service_id, null)

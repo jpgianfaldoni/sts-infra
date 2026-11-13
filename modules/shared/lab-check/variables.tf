@@ -25,7 +25,8 @@ variable "checks" {
     password_key  = optional(string)
     run_after     = optional(string)
     # Lakeflow Connect source setup that runs after the sample data loads:
-    # sqlserver_cdc, sqlserver_ct (change tracking), or postgresql_logical.
+    # sqlserver_cdc, sqlserver_ct (change tracking), postgresql_logical,
+    # mysql_binlog, or oracle_logminer.
     cdc_method       = optional(string)
     cdc_username_key = optional(string)
     cdc_password_key = optional(string)
@@ -37,8 +38,8 @@ variable "checks" {
   }
 
   validation {
-    condition     = alltrue([for check in values(var.checks) : contains(["postgresql", "sqlserver", "tcp"], check.engine)])
-    error_message = "Each check engine must be postgresql, sqlserver, or tcp."
+    condition     = alltrue([for check in values(var.checks) : contains(["postgresql", "sqlserver", "mysql", "oracle", "tcp"], check.engine)])
+    error_message = "Each check engine must be postgresql, sqlserver, mysql, oracle, or tcp."
   }
 
   validation {
@@ -54,10 +55,15 @@ variable "checks" {
       for check in values(var.checks) :
       check.cdc_method == null || (
         check.seed_file != null && check.cdc_username_key != null && check.cdc_password_key != null &&
-        contains(check.engine == "postgresql" ? ["postgresql_logical"] : check.engine == "sqlserver" ? ["sqlserver_cdc", "sqlserver_ct"] : [], check.cdc_method)
+        contains(lookup({
+          postgresql = ["postgresql_logical"]
+          sqlserver  = ["sqlserver_cdc", "sqlserver_ct"]
+          mysql      = ["mysql_binlog"]
+          oracle     = ["oracle_logminer"]
+        }, check.engine, []), check.cdc_method)
       )
     ])
-    error_message = "cdc_method must match the engine (postgresql_logical for postgresql; sqlserver_cdc or sqlserver_ct for sqlserver) and needs seed_file, cdc_username_key, and cdc_password_key."
+    error_message = "cdc_method must match the engine (postgresql_logical, sqlserver_cdc or sqlserver_ct, mysql_binlog, oracle_logminer) and needs seed_file, cdc_username_key, and cdc_password_key."
   }
 }
 

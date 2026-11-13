@@ -67,12 +67,21 @@ DRIVERS = {
         "pg8000.native",
     ),
     "sqlserver": (("pymssql==2.3.8",), "pymssql"),
+    "mysql": (("PyMySQL==1.2.3",), "pymysql"),
+    # python-oracledb thin mode needs no Oracle client libraries.
+    "oracle": (
+        ("oracledb==26.1.0", "cryptography==50.0.2", "cffi==2.1.1", "pycparser==3.12", "typing_extensions==4.16.0"),
+        "oracledb",
+    ),
 }
 TCP_TIMEOUT_SECONDS = 15
 SAMPLE_TABLES = ("customers", "orders")
 # Databricks' SQL Server utility objects script for Lakeflow Connect source setup.
 LAKEFLOW_UTILITY_SCRIPT_URL = "https://learn.microsoft.com/en-us/azure/databricks/_extras/documents/utility_script.sql"
-CDC_METHODS = ("sqlserver_cdc", "sqlserver_ct", "postgresql_logical")
+CDC_METHODS = ("sqlserver_cdc", "sqlserver_ct", "postgresql_logical", "mysql_binlog", "oracle_logminer")
+# Oracle sample tables live in this schema; the seed creates it.
+ORACLE_SCHEMA = "LAB"
+ORACLE_SETUP_DOCS_URL = "https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/oracle-integrated-setup"
 POSTGRES_PUBLICATION = "databricks_publication"
 POSTGRES_SLOT = "databricks_slot"
 IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
@@ -625,6 +634,327 @@ def setup_postgresql_logical(connect):
     print(f"Lakeflow Connect source ready: publication {POSTGRES_PUBLICATION} and slot {POSTGRES_SLOT} for {user}.")
 
 
+
+def connect_options_tls():
+    # Lab databases use the cloud provider's CA, and PrivateLink hosts do not
+    # match the certificate name, so encrypt without verifying the server.
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def check_mysql():
+    mysql = load_driver()
+    username, password = credentials()
+    context = connect_options_tls()
+
+    def connect(database, user=None, secret=None):
+        enter("login")
+        login = user or username
+        try:
+            return mysql.connect(
+                host=host, port=port, user=login, password=secret or password, database=database or None,
+                ssl=context, connect_timeout=30, read_timeout=120, write_timeout=120, autocommit=True,
+            )
+        except mysql.err.MySQLError as error:
+            fail("login", f"MySQL rejected the connection for {login} ({error}).", login_hint())
+
+    seed = read_seed()
+    if seed is not None:
+        connection = connect(params["seed_database"] or params["database"])
+        enter("seed")
+        with connection.cursor() as cursor:
+            for statement in split_postgresql(seed):
+                cursor.execute(statement)
+        connection.close()
+        result["seeded"] = True
+        print("Sample data loaded.")
+
+    connection = connect(params["database"])
+    enter("query")
+    with connection.cursor() as cursor:
+        if seed is None:
+            cursor.execute("SELECT 1")
+            result["seeded"] = False
+        else:
+            rows = {}
+            for table in SAMPLE_TABLES:
+                cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
+                rows[table] = cursor.fetchone()[0]
+            result["rows"] = rows
+    connection.close()
+    if seed is not None and params["cdc_method"] == "mysql_binlog":
+        setup_mysql_binlog(mysql, connect)
+
+
+def setup_mysql_binlog(mysql, connect):
+    """Binary log replication for Lakeflow Connect: settings, retention, user, grants."""
+    database = params["database"]
+    user, secret = cdc_credentials()
+    enter("cdc")
+    try:
+        connection = connect(database)
+        enter("cdc")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT @@log_bin, @@binlog_format, @@binlog_row_image, "
+                "IFNULL(@@binlog_row_value_options, ''), @@version, @@binlog_expire_logs_seconds"
+            )
+            log_bin, binlog_format, row_image, value_options, version, expire_seconds = cursor.fetchone()
+            problems = []
+            if int(log_bin) != 1:
+                problems.append("binary logging is off")
+            if binlog_format != "ROW":
+                problems.append(f"binlog_format is {binlog_format}, not ROW")
+            if row_image != "FULL":
+                problems.append(f"binlog_row_image is {row_image}, not FULL")
+            if value_options:
+                problems.append(f"binlog_row_value_options is {value_options}, not empty")
+            if problems:
+                fail(
+                    "cdc",
+                    "; ".join(problems) + ".",
+                    "These come from the server configuration (an RDS parameter group or Azure server parameters, "
+                    "which Terraform sets) and may need a restart; on RDS, binary logging also needs automated backups.",
+                )
+
+            # RDS purges binary logs right away unless retention is configured.
+            cursor.execute(
+                "SELECT @@basedir LIKE '/rdsdbbin/%' OR EXISTS (SELECT 1 FROM information_schema.ROUTINES "
+                "WHERE ROUTINE_SCHEMA = 'mysql' AND ROUTINE_NAME = 'rds_set_configuration')"
+            )
+            platform = "rds" if cursor.fetchone()[0] else "mysql"
+            if platform == "rds":
+                cursor.execute("CALL mysql.rds_set_configuration('binlog retention hours', 168)")
+                retention_hours = 168
+            else:
+                retention_hours = int(expire_seconds) // 3600
+                if int(expire_seconds) < 86400:
+                    fail("cdc", f"binlog_expire_logs_seconds is {expire_seconds}, below one day (86400).", "Set it to 604800 (seven days) in the server configuration.")
+
+            # MySQL 8 uses caching_sha2_password, the plugin Lakeflow Connect expects.
+            plugin = "caching_sha2_password" if not str(version).startswith("5.") else "sha256_password"
+            cursor.execute(f"CREATE USER IF NOT EXISTS %s@'%%' IDENTIFIED WITH {plugin} BY %s", (user, secret))
+            cursor.execute(f"ALTER USER %s@'%%' IDENTIFIED WITH {plugin} BY %s", (user, secret))
+            cursor.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO %s@'%%'", (user,))
+            cursor.execute("GRANT SELECT (plugin, user) ON mysql.user TO %s@'%%'", (user,))
+            for table in SAMPLE_TABLES:
+                cursor.execute(f"GRANT SELECT ON `{database}`.`{table}` TO %s@'%%'", (user,))
+        connection.close()
+
+        ingestion = connect(database, user, secret)
+        enter("cdc")
+        with ingestion.cursor() as cursor:
+            for table in SAMPLE_TABLES:
+                cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
+                cursor.fetchone()
+            # Proves REPLICATION CLIENT: the gateway reads the binary log position.
+            try:
+                cursor.execute("SHOW BINARY LOG STATUS")
+            except mysql.err.MySQLError:
+                cursor.execute("SHOW MASTER STATUS")
+            position = cursor.fetchone()
+        ingestion.close()
+        if not position:
+            fail("cdc", "the ingestion user cannot read the binary log position.", cdc_hint())
+    except LabCheckFailed:
+        raise
+    except Exception as error:  # noqa: BLE001 - report the MySQL error with the stage
+        fail("cdc", f"{type(error).__name__}: {error}", cdc_hint())
+
+    result["cdc"] = {
+        "status": "ready",
+        "method": "binlog",
+        "platform": platform,
+        "database": database,
+        "tables": [f"{database}.{table}" for table in SAMPLE_TABLES],
+        "tracked": [f"{database}.{table}" for table in SAMPLE_TABLES],
+        "ingestion_user": user,
+        "binlog_retention_hours": retention_hours,
+        "mysql_version": str(version),
+    }
+    print(f"Lakeflow Connect source ready: binary log replication for {user}, {retention_hours}h retention.")
+
+
+def split_oracle(script):
+    """Split on lines that contain only a slash, as SQL*Plus does, and drop the
+    comment lines that lead each block so the driver sees the statement first."""
+    blocks = []
+    for block in re.split(r"(?m)^[\t ]*/[\t ]*$", script):
+        lines = block.strip().splitlines()
+        while lines and (not lines[0].strip() or lines[0].lstrip().startswith("--")):
+            lines.pop(0)
+        if lines:
+            blocks.append("\n".join(lines).strip())
+    return blocks
+
+
+def check_oracle():
+    oracle = load_driver()
+    username, password = credentials()
+
+    def connect(service, user=None, secret=None):
+        enter("login")
+        login = user or username
+        try:
+            return oracle.connect(user=login, password=secret or password, dsn=f"{host}:{port}/{service}", tcp_connect_timeout=30)
+        except oracle.Error as error:
+            fail("login", f"Oracle rejected the connection for {login} ({error}).", login_hint())
+
+    seed = read_seed()
+    service = params["database"]
+    if seed is not None:
+        connection = connect(params["seed_database"] or service)
+        enter("seed")
+        with connection.cursor() as cursor:
+            for block in split_oracle(seed):
+                cursor.execute(block)
+        connection.commit()
+        connection.close()
+        result["seeded"] = True
+        print("Sample data loaded.")
+
+    connection = connect(service)
+    enter("query")
+    with connection.cursor() as cursor:
+        if seed is None:
+            cursor.execute("SELECT 1 FROM dual")
+            cursor.fetchall()
+            result["seeded"] = False
+        else:
+            rows = {}
+            for table in SAMPLE_TABLES:
+                cursor.execute(f"SELECT COUNT(*) FROM {ORACLE_SCHEMA}.{table.upper()}")
+                rows[table] = cursor.fetchone()[0]
+            result["rows"] = rows
+    connection.close()
+    if seed is not None and params["cdc_method"] == "oracle_logminer":
+        setup_oracle_logminer(oracle, connect)
+
+
+def download_oracle_setup_package():
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(ORACLE_SETUP_DOCS_URL, timeout=60) as response:
+            page = response.read().decode("utf-8", "replace")
+        match = re.search(r"/[A-Za-z0-9/_-]*dbx-oracle-setup-package-[0-9a-f]+\.sql", page)
+        if not match:
+            fail("cdc", "could not find the dbx-oracle-setup-package.sql link on the Oracle setup page.", f"Check {ORACLE_SETUP_DOCS_URL}.")
+        with urllib.request.urlopen("https://docs.databricks.com" + match.group(0), timeout=60) as response:
+            script = response.read().decode("utf-8-sig")
+    except LabCheckFailed:
+        raise
+    except Exception as error:  # noqa: BLE001 - report any download failure
+        fail(
+            "cdc",
+            f"could not download the Databricks Oracle setup package ({error}).",
+            "The setup downloads it from docs.databricks.com, so this compute needs outbound internet access.",
+        )
+    if "dbx_oracle_setup_util" not in script:
+        fail("cdc", "the downloaded file is not the Databricks Oracle setup package.", cdc_hint())
+    return split_oracle(script)
+
+
+def setup_oracle_logminer(oracle, connect):
+    """LogMiner CDC for Lakeflow Connect on a non-multitenant database (Amazon RDS)."""
+    service = params["database"]
+    user, secret = cdc_credentials()
+    user = user.upper()
+    if not re.fullmatch(r"[A-Za-z0-9!#$%&*()_=+-]{8,30}", secret):
+        fail("cdc", "the ingestion password has characters Oracle cannot take in a quoted password.", cdc_hint())
+    tables = [table.upper() for table in SAMPLE_TABLES]
+    messages = []
+
+    def output(cursor):
+        lines, status = cursor.var(str), cursor.var(int)
+        while True:
+            cursor.callproc("dbms_output.get_line", (lines, status))
+            if status.getvalue() != 0:
+                return
+            messages.append(lines.getvalue() or "")
+
+    enter("cdc")
+    try:
+        connection = connect(service)
+        enter("cdc")
+        with connection.cursor() as cursor:
+            cursor.callproc("dbms_output.enable", (None,))
+            cursor.execute("SELECT COUNT(*) FROM all_users WHERE username = 'RDSADMIN'")
+            rds = cursor.fetchone()[0] > 0
+            cursor.execute("SELECT log_mode, supplemental_log_data_min, cdb FROM v$database")
+            log_mode, supplemental_min, cdb = cursor.fetchone()
+            if log_mode != "ARCHIVELOG":
+                fail(
+                    "cdc",
+                    f"the database is in {log_mode} mode, not ARCHIVELOG.",
+                    "On Amazon RDS, archive logging follows automated backups; keep backup retention above zero.",
+                )
+            if cdb == "YES":
+                fail("cdc", "the database is multitenant (CDB).", "Lakeflow Connect does not support multitenant Amazon RDS for Oracle; use a non-CDB engine.")
+            if rds:
+                # Keep archive logs for 48 hours, as Lakeflow Connect recommends.
+                cursor.execute("BEGIN rdsadmin.rdsadmin_util.set_configuration(name => 'archivelog retention hours', value => '48'); END;")
+                if supplemental_min == "NO":
+                    cursor.execute("BEGIN rdsadmin.rdsadmin_util.alter_supplemental_logging(p_action => 'ADD'); END;")
+            elif supplemental_min == "NO":
+                cursor.execute("ALTER DATABASE ADD SUPPLEMENTAL LOG DATA")
+            for table in tables:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM all_log_groups WHERE owner = :o AND table_name = :t AND log_group_type = 'ALL COLUMN LOGGING'",
+                    o=ORACLE_SCHEMA, t=table,
+                )
+                if cursor.fetchone()[0] == 0:
+                    cursor.execute(f"ALTER TABLE {ORACLE_SCHEMA}.{table} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
+
+            for block in download_oracle_setup_package():
+                cursor.execute(block)
+            cursor.execute("SELECT status FROM all_objects WHERE object_name = 'DBX_ORACLE_SETUP_UTIL' AND object_type = 'PACKAGE BODY' AND owner = USER")
+            status = cursor.fetchone()
+            if not status or status[0] != "VALID":
+                fail("cdc", "the Databricks Oracle setup package did not compile.", cdc_hint())
+
+            cursor.callproc("dbx_oracle_setup_util.create_user", (user, secret, "USERS", "TEMP"))
+            # create_user skips existing users, so set the current password too.
+            cursor.execute(f'ALTER USER {user} IDENTIFIED BY "{secret}"')
+            cursor.callproc("dbx_oracle_setup_util.grant_permissions", (user,))
+            for table in tables:
+                cursor.callproc("dbx_oracle_setup_util.grant_select_on_table", (user, ORACLE_SCHEMA, table))
+            cursor.callproc("dbx_oracle_setup_util.validate_setup", (user,))
+            output(cursor)
+            cursor.execute("SELECT supplemental_log_data_min FROM v$database")
+            supplemental_min = cursor.fetchone()[0]
+        connection.close()
+
+        ingestion = connect(service, user, secret)
+        enter("cdc")
+        with ingestion.cursor() as cursor:
+            for table in tables:
+                cursor.execute(f"SELECT COUNT(*) FROM {ORACLE_SCHEMA}.{table}")
+                cursor.fetchone()
+            cursor.execute("SELECT log_mode FROM v$database")
+            cursor.fetchone()
+        ingestion.close()
+    except LabCheckFailed:
+        raise
+    except Exception as error:  # noqa: BLE001 - report the Oracle error with the setup package output
+        detail = " | ".join(line for line in messages[-8:] if line)
+        fail("cdc", f"{type(error).__name__}: {error}" + (f" (setup output: {detail})" if detail else ""), cdc_hint())
+
+    result["cdc"] = {
+        "status": "ready",
+        "method": "logminer",
+        "platform": "rds" if rds else "oracle",
+        "database": service,
+        "tables": [f"{ORACLE_SCHEMA}.{table}" for table in tables],
+        "tracked": [f"{ORACLE_SCHEMA}.{table}" for table in tables],
+        "ingestion_user": user,
+        "supplemental_log_data_min": supplemental_min,
+    }
+    print(f"Lakeflow Connect source ready: LogMiner for {user} on {', '.join(result['cdc']['tables'])}.")
+
+
 # COMMAND ----------
 
 try:
@@ -635,6 +965,10 @@ try:
         check_postgresql()
     elif engine == "sqlserver":
         check_sqlserver()
+    elif engine == "mysql":
+        check_mysql()
+    elif engine == "oracle":
+        check_oracle()
 except LabCheckFailed:
     raise
 except Exception as error:  # noqa: BLE001 - classify anything the checks did not anticipate

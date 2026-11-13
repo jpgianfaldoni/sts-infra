@@ -1033,7 +1033,7 @@ run "lab_check_enables_change_tracking_on_azure_sql" {
   }
 
   assert {
-    condition     = output.lab_check.checks.sql_database_serverless.cdc == "sqlserver_ct"
+    condition     = output.lab_check.checks.sql_database_serverless.cdc == "sqlserver_ct" && contains(output.key_vault.secret_names, local.lab_checks.sql_database_serverless.cdc_password_key)
     error_message = "Azure SQL Database (Basic tier) must be prepared for Lakeflow Connect with change tracking."
   }
 
@@ -1067,4 +1067,123 @@ run "lab_check_azure_sql_lakeflow_can_be_disabled" {
     condition     = output.lab_check.checks.sql_database_serverless.cdc == null && !contains(output.key_vault.secret_names, "sql-database-lakeflow-password")
     error_message = "Disabling Lakeflow Connect must skip the source setup and its login."
   }
+}
+
+run "mysql_flexible_server_serverless_private_link_with_binlog_setup" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace             = true
+      mysql_flexible_server = true
+    }
+    connectivity = {
+      mysql_flexible_server = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      local.lab_checks.mysql_flexible_server_serverless.cdc_username_key == "mysql-flexible-server-lakeflow-username" &&
+      contains(output.key_vault.secret_names, local.lab_checks.mysql_flexible_server_serverless.cdc_password_key)
+    )
+    error_message = "The job must read the Lakeflow login under the exact Key Vault secret names."
+  }
+
+  assert {
+    condition     = local.serverless_private_endpoint_rules.mysql_flexible_server.group_id == "mysqlServer"
+    error_message = "Serverless compute must reach the flexible server through a mysqlServer private endpoint rule."
+  }
+
+  assert {
+    condition = (
+      output.lab_check.checks.mysql_flexible_server_serverless.engine == "mysql" &&
+      output.lab_check.checks.mysql_flexible_server_serverless.seeded &&
+      output.lab_check.checks.mysql_flexible_server_serverless.cdc == "mysql_binlog"
+    )
+    error_message = "The flexible server must be seeded and prepared for binary log replication."
+  }
+
+  assert {
+    condition = (
+      contains(output.key_vault.secret_names, "mysql-flexible-server-admin-password") &&
+      contains(output.key_vault.secret_names, "mysql-flexible-server-lakeflow-password")
+    )
+    error_message = "The MySQL admin and replication passwords must be in Key Vault."
+  }
+}
+
+run "mysql_flexible_server_classic_peering" {
+  command = plan
+
+  variables {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace             = true
+      mysql_flexible_server = true
+    }
+    mysql_flexible_server = {
+      workspace_peering_enabled = true
+    }
+  }
+
+  assert {
+    condition     = length(module.mysql_flexible_server_workspace_peering) == 1 && keys(output.lab_check.checks) == ["mysql_flexible_server_classic"]
+    error_message = "Peering must give classic compute a checked path to the flexible server."
+  }
+}
+
+run "database_vms_without_network_path" {
+  command = plan
+
+  variables {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace = true
+      mysql_vm  = true
+      oracle_vm = true
+    }
+    oracle_vm = {
+      private_dns_name = "oracle.lab.internal"
+    }
+  }
+
+  assert {
+    condition     = output.lab_check == null && length(local.serverless_private_endpoint_rules) == 0
+    error_message = "The database VMs must have no Databricks path and no lab check job."
+  }
+
+  assert {
+    condition = alltrue([for name in ["mysql-vm-lakeflow-password", "oracle-vm-lakeflow-password", "oracle-vm-oracle-password"] :
+    contains(output.key_vault.secret_names, name)])
+    error_message = "The VM database and Lakeflow passwords must be in Key Vault."
+  }
+
+  assert {
+    condition     = module.oracle_vm[0].cdb_service_name == "FREE" && module.oracle_vm[0].lakeflow_username == "C##LAKEFLOW" && module.oracle_vm[0].hostname == "oracle.lab.internal"
+    error_message = "The Oracle VM must report the CDB service, the common Lakeflow user, and its private hostname."
+  }
+}
+
+run "reject_mysql_private_link_without_feature" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace = true
+    }
+    connectivity = {
+      mysql_flexible_server = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  expect_failures = [var.connectivity]
 }

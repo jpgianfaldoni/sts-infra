@@ -15,15 +15,24 @@ resource "databricks_secret_scope" "this" {
   name = var.managed_secret_scope
 }
 
+# Create the folder explicitly: the provider does not always create a missing
+# parent for notebooks and files in a new workspace.
+# The provider creates the seed/ subfolder implicitly when it uploads the seed
+# files, so Terraform does not track it; delete recursively on destroy.
+resource "databricks_directory" "this" {
+  path             = local.folder
+  delete_recursive = true
+}
+
 resource "databricks_notebook" "lab_check" {
-  path   = "${local.folder}/lab_check"
+  path   = "${databricks_directory.this.path}/lab_check"
   source = "${path.module}/notebooks/lab_check.py"
 }
 
 resource "databricks_workspace_file" "seed" {
   for_each = local.seed_files
 
-  path   = "${local.folder}/seed/${each.key}.sql"
+  path   = "${databricks_directory.this.path}/seed/${each.key}.sql"
   source = each.value
 }
 

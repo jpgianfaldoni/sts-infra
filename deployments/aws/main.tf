@@ -102,6 +102,39 @@ module "rds_sql_server" {
   tags                           = var.tags
 }
 
+module "rds_mysql" {
+  count                          = var.features.rds_mysql ? 1 : 0
+  source                         = "../../modules/aws/rds-mysql"
+  name_prefix                    = "${local.name_prefix}-mysql"
+  region                         = var.region
+  vpc_cidr                       = var.database_networks.rds_mysql
+  engine_version                 = var.rds_mysql.engine_version
+  instance_class                 = var.rds_mysql.instance_class
+  lakeflow_connect_enabled       = var.rds_mysql.lakeflow_connect_enabled
+  enable_classic_private_link    = var.connectivity.rds_mysql.classic == "private_link"
+  enable_serverless_private_link = var.connectivity.rds_mysql.serverless == "private_link"
+  deletion_protection            = !var.allow_destructive_demo_cleanup
+  skip_final_snapshot            = var.allow_destructive_demo_cleanup
+  tags                           = var.tags
+}
+
+module "rds_oracle" {
+  count                          = var.features.rds_oracle ? 1 : 0
+  source                         = "../../modules/aws/rds-oracle"
+  name_prefix                    = "${local.name_prefix}-oracle"
+  region                         = var.region
+  vpc_cidr                       = var.database_networks.rds_oracle
+  engine                         = var.rds_oracle.engine
+  engine_version                 = var.rds_oracle.engine_version
+  instance_class                 = var.rds_oracle.instance_class
+  lakeflow_connect_enabled       = var.rds_oracle.lakeflow_connect_enabled
+  enable_classic_private_link    = var.connectivity.rds_oracle.classic == "private_link"
+  enable_serverless_private_link = var.connectivity.rds_oracle.serverless == "private_link"
+  deletion_protection            = !var.allow_destructive_demo_cleanup
+  skip_final_snapshot            = var.allow_destructive_demo_cleanup
+  tags                           = var.tags
+}
+
 module "aurora_postgres" {
   count                          = var.features.aurora_postgres ? 1 : 0
   source                         = "../../modules/aws/aurora-postgres"
@@ -241,6 +274,36 @@ module "rds_sql_server_classic_private_link" {
   depends_on               = [module.rds_sql_server]
 }
 
+module "rds_mysql_classic_private_link" {
+  count  = var.features.rds_mysql && var.connectivity.rds_mysql.classic == "private_link" ? 1 : 0
+  source = "../../modules/aws/classic-private-link"
+
+  name                     = "${local.name_prefix}-mysql-classic"
+  vpc_id                   = module.workspace[0].vpc_id
+  subnet_ids               = module.workspace[0].private_subnet_ids
+  client_security_group_id = module.workspace[0].security_group_id
+  endpoint_service_name    = module.rds_mysql[0].endpoint_service_name
+  endpoint_service_id      = module.rds_mysql[0].endpoint_service_id
+  service_port             = module.rds_mysql[0].port
+  tags                     = var.tags
+  depends_on               = [module.rds_mysql]
+}
+
+module "rds_oracle_classic_private_link" {
+  count  = var.features.rds_oracle && var.connectivity.rds_oracle.classic == "private_link" ? 1 : 0
+  source = "../../modules/aws/classic-private-link"
+
+  name                     = "${local.name_prefix}-oracle-classic"
+  vpc_id                   = module.workspace[0].vpc_id
+  subnet_ids               = module.workspace[0].private_subnet_ids
+  client_security_group_id = module.workspace[0].security_group_id
+  endpoint_service_name    = module.rds_oracle[0].endpoint_service_name
+  endpoint_service_id      = module.rds_oracle[0].endpoint_service_id
+  service_port             = module.rds_oracle[0].port
+  tags                     = var.tags
+  depends_on               = [module.rds_oracle]
+}
+
 module "aurora_postgres_classic_private_link" {
   count  = var.features.aurora_postgres && var.connectivity.aurora_postgres.classic == "private_link" ? 1 : 0
   source = "../../modules/aws/classic-private-link"
@@ -300,6 +363,16 @@ locals {
       }
       } : {
     },
+    var.features.rds_mysql && var.connectivity.rds_mysql.serverless == "private_link" ? { rds_mysql = { endpoint_service = module.rds_mysql[0].endpoint_service_name
+      domain_names = [module.rds_mysql[0].host]
+      }
+      } : {
+    },
+    var.features.rds_oracle && var.connectivity.rds_oracle.serverless == "private_link" ? { rds_oracle = { endpoint_service = module.rds_oracle[0].endpoint_service_name
+      domain_names = [module.rds_oracle[0].host]
+      }
+      } : {
+    },
     var.features.aurora_postgres && var.connectivity.aurora_postgres.serverless == "private_link" ? { aurora_postgres = { endpoint_service = module.aurora_postgres[0].endpoint_service_name
       domain_names = [module.aurora_postgres[0].reader_endpoint]
       }
@@ -329,6 +402,8 @@ locals {
   serverless_private_link_enabled = var.features.workspace && anytrue([
     var.features.rds_postgres && var.connectivity.rds_postgres.serverless == "private_link",
     var.features.rds_sql_server && var.connectivity.rds_sql_server.serverless == "private_link",
+    var.features.rds_mysql && var.connectivity.rds_mysql.serverless == "private_link",
+    var.features.rds_oracle && var.connectivity.rds_oracle.serverless == "private_link",
     var.features.aurora_postgres && var.connectivity.aurora_postgres.serverless == "private_link",
     var.features.rabbitmq && var.connectivity.rabbitmq.serverless == "private_link",
     var.features.kafka && var.connectivity.kafka.serverless == "private_link",
@@ -359,7 +434,7 @@ module "ncc" {
   }
   network_connectivity_config_id = local.network_connectivity_config_id
   private_endpoint_rules         = local.ncc_rules
-  depends_on                     = [module.rds_postgres, module.rds_sql_server, module.aurora_postgres, module.rabbitmq, module.kafka, module.simulated_on_prem]
+  depends_on                     = [module.rds_postgres, module.rds_sql_server, module.rds_mysql, module.rds_oracle, module.aurora_postgres, module.rabbitmq, module.kafka, module.simulated_on_prem]
 }
 
 moved {
@@ -405,6 +480,38 @@ module "sqlserver_peering" {
   service_route_table_ids   = module.rds_sql_server[0].route_table_ids
   service_security_group_id = module.rds_sql_server[0].security_group_id
   service_port              = module.rds_sql_server[0].port
+  tags                      = var.tags
+}
+
+module "mysql_peering" {
+  count                     = var.features.rds_mysql && var.connectivity.rds_mysql.classic == "peering" ? 1 : 0
+  source                    = "../../modules/aws/vpc-peering"
+  name                      = "${local.name_prefix}-mysql"
+  client_vpc_id             = module.workspace[0].vpc_id
+  client_vpc_cidr           = module.workspace[0].vpc_cidr
+  client_route_table_ids    = module.workspace[0].private_route_table_ids
+  client_security_group_id  = module.workspace[0].security_group_id
+  service_vpc_id            = module.rds_mysql[0].vpc_id
+  service_vpc_cidr          = module.rds_mysql[0].vpc_cidr
+  service_route_table_ids   = module.rds_mysql[0].route_table_ids
+  service_security_group_id = module.rds_mysql[0].security_group_id
+  service_port              = module.rds_mysql[0].port
+  tags                      = var.tags
+}
+
+module "oracle_peering" {
+  count                     = var.features.rds_oracle && var.connectivity.rds_oracle.classic == "peering" ? 1 : 0
+  source                    = "../../modules/aws/vpc-peering"
+  name                      = "${local.name_prefix}-oracle"
+  client_vpc_id             = module.workspace[0].vpc_id
+  client_vpc_cidr           = module.workspace[0].vpc_cidr
+  client_route_table_ids    = module.workspace[0].private_route_table_ids
+  client_security_group_id  = module.workspace[0].security_group_id
+  service_vpc_id            = module.rds_oracle[0].vpc_id
+  service_vpc_cidr          = module.rds_oracle[0].vpc_cidr
+  service_route_table_ids   = module.rds_oracle[0].route_table_ids
+  service_security_group_id = module.rds_oracle[0].security_group_id
+  service_port              = module.rds_oracle[0].port
   tags                      = var.tags
 }
 

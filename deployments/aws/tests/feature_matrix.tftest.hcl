@@ -1428,3 +1428,101 @@ run "lab_check_enables_logical_replication_on_rds_postgres" {
     error_message = "./infra verify must copy the replication login into the scope."
   }
 }
+
+run "rds_mysql_serverless_private_link_with_binlog_setup" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace = true
+      rds_mysql = true
+    }
+    connectivity = {
+      rds_mysql = {
+        classic    = "none"
+        serverless = "private_link"
+      }
+    }
+  }
+  assert {
+    condition = (
+      output.lab_check.checks.rds_mysql_serverless.engine == "mysql" &&
+      output.lab_check.checks.rds_mysql_serverless.seeded &&
+      output.lab_check.checks.rds_mysql_serverless.cdc == "mysql_binlog"
+    )
+    error_message = "RDS MySQL must be seeded and prepared for Lakeflow Connect binary log replication."
+  }
+  assert {
+    condition = (
+      length(output.lab_check.credentials) == 2 &&
+      output.lab_check.credentials[0].username_key == "rds_mysql-username" &&
+      output.lab_check.credentials[1].password_key == "rds_mysql-lakeflow-password"
+    )
+    error_message = "./infra verify must copy the MySQL admin and replication credentials into the scope."
+  }
+  assert {
+    condition     = output.connectivity.rds_mysql.serverless.mode == "private_link"
+    error_message = "The MySQL serverless path must be reported."
+  }
+}
+
+run "rds_oracle_classic_peering_with_logminer_setup" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace  = true
+      rds_oracle = true
+    }
+    connectivity = {
+      rds_oracle = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  assert {
+    condition = (
+      output.lab_check.checks.rds_oracle_classic.engine == "oracle" &&
+      output.lab_check.checks.rds_oracle_classic.port == 1521 &&
+      output.lab_check.checks.rds_oracle_classic.cdc == "oracle_logminer"
+    )
+    error_message = "RDS for Oracle must be checked on port 1521 and prepared for LogMiner CDC."
+  }
+  assert {
+    condition     = length(module.oracle_peering) == 1 && length(module.mysql_peering) == 0
+    error_message = "Only the Oracle VPC must be peered."
+  }
+}
+
+run "reject_multitenant_rds_oracle_engine" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace  = true
+      rds_oracle = true
+    }
+    rds_oracle = {
+      engine = "oracle-se2-cdb"
+    }
+  }
+  expect_failures = [var.rds_oracle]
+}
+
+run "reject_mysql_connectivity_without_feature" {
+  command = plan
+  variables {
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace = true
+    }
+    connectivity = {
+      rds_mysql = {
+        classic    = "peering"
+        serverless = "none"
+      }
+    }
+  }
+  expect_failures = [var.connectivity]
+}

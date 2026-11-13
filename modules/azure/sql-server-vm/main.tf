@@ -203,7 +203,7 @@ resource "azurerm_virtual_machine_run_command" "lakeflow_cdc_setup" {
   lifecycle {
     postcondition {
       condition     = try(self.instance_view[0].exit_code, 1) == 0
-      error_message = "Lakeflow Connect CDC setup failed on the SQL Server VM. Read the LAKEFLOW_CDC_SETUP_FAILED line with: az vm run-command show --resource-group <sql-vm-resource-group> --vm-name <sql-vm> --run-command-name lakeflow-cdc-setup --instance-view"
+      error_message = "Lakeflow Connect CDC setup failed on the SQL Server VM. Read the LAKEFLOW_CDC_SETUP_FAILED line with: ./infra vm-setup-status azure <environment.tfvars>"
     }
   }
   # The SQL IaaS extension enables SQL authentication and creates the

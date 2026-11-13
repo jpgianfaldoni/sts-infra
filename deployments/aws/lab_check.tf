@@ -42,6 +42,41 @@ locals {
         cdc_secret_arn  = module.rds_sql_server[0].lakeflow_secret_arn
       }
     } : {},
+    var.features.rds_mysql ? {
+      rds_mysql = {
+        engine          = "mysql"
+        classic         = var.connectivity.rds_mysql.classic
+        serverless      = var.connectivity.rds_mysql.serverless
+        classic_host    = var.connectivity.rds_mysql.classic == "private_link" ? try(module.rds_mysql_classic_private_link[0].dns_name, null) : module.rds_mysql[0].host
+        classic_port    = module.rds_mysql[0].port
+        serverless_host = module.rds_mysql[0].host
+        serverless_port = module.rds_mysql[0].port
+        database        = module.rds_mysql[0].database_name
+        seed_database   = module.rds_mysql[0].database_name
+        seed_file       = module.rds_mysql[0].seed_file
+        secret_arn      = module.rds_mysql[0].master_secret_arn
+        cdc_method      = var.rds_mysql.lakeflow_connect_enabled ? "mysql_binlog" : null
+        cdc_secret_arn  = module.rds_mysql[0].lakeflow_secret_arn
+      }
+    } : {},
+    var.features.rds_oracle ? {
+      rds_oracle = {
+        engine          = "oracle"
+        classic         = var.connectivity.rds_oracle.classic
+        serverless      = var.connectivity.rds_oracle.serverless
+        classic_host    = var.connectivity.rds_oracle.classic == "private_link" ? try(module.rds_oracle_classic_private_link[0].dns_name, null) : module.rds_oracle[0].host
+        classic_port    = module.rds_oracle[0].port
+        serverless_host = module.rds_oracle[0].host
+        serverless_port = module.rds_oracle[0].port
+        # The service name; the sample tables live in the LAB schema.
+        database       = module.rds_oracle[0].database_name
+        seed_database  = module.rds_oracle[0].database_name
+        seed_file      = module.rds_oracle[0].seed_file
+        secret_arn     = module.rds_oracle[0].master_secret_arn
+        cdc_method     = var.rds_oracle.lakeflow_connect_enabled ? "oracle_logminer" : null
+        cdc_secret_arn = module.rds_oracle[0].lakeflow_secret_arn
+      }
+    } : {},
     # Aurora is reached through its reader endpoint, which is read-only, so its
     # checks only connect and run a query.
     var.features.aurora_postgres ? {

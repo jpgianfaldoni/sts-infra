@@ -42,9 +42,9 @@ jobs:
       - name: Lab check driver sets
         run: python3 tests/test_lab_check_drivers.py
 
-  # macOS ships bash 3.2 as /bin/bash; exercise the auth workflow there because
-  # operators commonly run ./infra with it.
-  auth-macos-bash32:
+  # macOS ships bash 3.2 as /bin/bash and Python 3.9 as /usr/bin/python3, the
+  # oldest versions ./infra supports; operators commonly run it with them.
+  cli-macos-system-tools:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,14 +52,16 @@ jobs:
         run: |
           command -v rg >/dev/null || brew install ripgrep
           command -v jq >/dev/null || brew install jq
-      # ./infra uses `#!/usr/bin/env bash`; put /bin/bash first on PATH so the
-      # script under test also runs with 3.2 rather than a Homebrew bash.
-      - name: Prefer /bin/bash
+      # ./infra uses `#!/usr/bin/env bash` and runs `python3`; put the system
+      # versions first on PATH rather than Homebrew's.
+      - name: Prefer the system bash and Python
         run: |
-          mkdir -p "$RUNNER_TEMP/bash32"
-          ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
-          echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
-      - name: Auth workflow tests on bash 3.2
+          mkdir -p "$RUNNER_TEMP/system"
+          ln -sf /bin/bash "$RUNNER_TEMP/system/bash"
+          ln -sf /usr/bin/python3 "$RUNNER_TEMP/system/python3"
+          echo "$RUNNER_TEMP/system" >> "$GITHUB_PATH"
+      - name: CLI tests with the system bash and Python
         run: |
           bash --version | head -1
+          python3 --version
           bash tests/test_infra_auth_setup.sh

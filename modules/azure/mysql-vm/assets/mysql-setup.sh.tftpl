@@ -1,0 +1,91 @@
+#!/bin/bash
+# Installs MySQL on the VM and prepares it for Lakeflow Connect. Azure VM Run
+# Command runs it as root through the VM agent, so no network path to MySQL is
+# needed. Parameters arrive as environment variables. It is safe to rerun.
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+DATABASE='${database_name}'
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
+fail() { echo "LAKEFLOW_CDC_SETUP_FAILED $*"; exit 1; }
+trap 'fail "command failed at line $LINENO: $BASH_COMMAND"' ERR
+
+for value in "$MYSQL_ADMIN_USER" "$LAKEFLOW_USER"; do
+  [[ "$value" =~ ^[A-Za-z][A-Za-z0-9_]{0,31}$ ]] || fail "invalid user name $value"
+done
+for value in "$MYSQL_ADMIN_PASSWORD" "$LAKEFLOW_PASSWORD"; do
+  [[ "$value" =~ ^[A-Za-z0-9!#%*()_=+-]{8,64}$ ]] || fail "a generated password has characters SQL literals cannot take"
+done
+
+# Root signs in through the auth_socket plugin, which needs no password.
+sql() { mysql --protocol=socket -uroot --batch --skip-column-names "$@"; }
+
+if ! command -v mysqld >/dev/null; then
+  log "Installing MySQL server."
+  apt-get update -q
+  apt-get install -yq mysql-server
+fi
+
+log "Configuring binary logging for Lakeflow Connect (ROW format, full row images, seven-day retention)."
+cat > /etc/mysql/mysql.conf.d/zz-lakeflow.cnf <<'CNF'
+[mysqld]
+bind-address = 0.0.0.0
+server-id = 1
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_format = ROW
+binlog_row_image = FULL
+binlog_expire_logs_seconds = 604800
+CNF
+systemctl enable mysql >/dev/null
+systemctl restart mysql
+for attempt in $(seq 1 60); do
+  mysqladmin --protocol=socket -uroot ping >/dev/null 2>&1 && break
+  sleep 2
+done
+mysqladmin --protocol=socket -uroot ping >/dev/null 2>&1 || fail "MySQL did not start"
+
+log "Creating the administrator $MYSQL_ADMIN_USER."
+sql <<SQL
+CREATE USER IF NOT EXISTS '$MYSQL_ADMIN_USER'@'%' IDENTIFIED WITH caching_sha2_password BY '$MYSQL_ADMIN_PASSWORD';
+ALTER USER '$MYSQL_ADMIN_USER'@'%' IDENTIFIED WITH caching_sha2_password BY '$MYSQL_ADMIN_PASSWORD';
+GRANT ALL PRIVILEGES ON *.* TO '$MYSQL_ADMIN_USER'@'%' WITH GRANT OPTION;
+CREATE DATABASE IF NOT EXISTS \`$DATABASE\`;
+SQL
+
+log "Loading the sample data into $DATABASE."
+echo '${seed_sql_base64}' | base64 -d | sql "$DATABASE"
+
+%{ if lakeflow ~}
+log "Creating the Lakeflow Connect replication user $LAKEFLOW_USER."
+sql <<SQL
+CREATE USER IF NOT EXISTS '$LAKEFLOW_USER'@'%' IDENTIFIED WITH caching_sha2_password BY '$LAKEFLOW_PASSWORD';
+ALTER USER '$LAKEFLOW_USER'@'%' IDENTIFIED WITH caching_sha2_password BY '$LAKEFLOW_PASSWORD';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '$LAKEFLOW_USER'@'%';
+GRANT SELECT (plugin, user) ON mysql.user TO '$LAKEFLOW_USER'@'%';
+GRANT SELECT ON \`$DATABASE\`.\`customers\` TO '$LAKEFLOW_USER'@'%';
+GRANT SELECT ON \`$DATABASE\`.\`orders\` TO '$LAKEFLOW_USER'@'%';
+SQL
+
+log "Checking the binary log settings."
+read -r log_bin binlog_format row_image value_options expire_seconds version <<<"$(sql -e "SELECT @@log_bin, @@binlog_format, @@binlog_row_image, IF(IFNULL(@@binlog_row_value_options, '') = '', '-', @@binlog_row_value_options), @@binlog_expire_logs_seconds, @@version")"
+[[ "$log_bin" == 1 && "$binlog_format" == ROW && "$row_image" == FULL && "$value_options" == - ]] ||
+  fail "binary logging is not ready: log_bin=$log_bin binlog_format=$binlog_format binlog_row_image=$row_image binlog_row_value_options=$value_options"
+(( expire_seconds >= 86400 )) || fail "binlog_expire_logs_seconds is $expire_seconds, below one day"
+
+log "Checking that the binary log records a change, as the replication user sees it."
+as_lakeflow() { MYSQL_PWD="$LAKEFLOW_PASSWORD" mysql -h127.0.0.1 -u"$LAKEFLOW_USER" --batch --skip-column-names "$@"; }
+status() { as_lakeflow -e "SHOW BINARY LOG STATUS" 2>/dev/null || as_lakeflow -e "SHOW MASTER STATUS"; }
+before="$(status | awk '{print $1":"$2}')"
+sql "$DATABASE" -e "UPDATE orders SET status = 'shipped' WHERE order_id = 1001; UPDATE orders SET status = 'paid' WHERE order_id = 1001;"
+after="$(status | awk '{print $1":"$2}')"
+[[ -n "$after" && "$after" != "$before" ]] || fail "the binary log position did not move after a change ($before -> $after)"
+customers="$(as_lakeflow "$DATABASE" -e "SELECT COUNT(*) FROM customers")"
+orders="$(as_lakeflow "$DATABASE" -e "SELECT COUNT(*) FROM orders")"
+
+printf 'LAKEFLOW_CDC_SETUP_RESULT {"status":"ready","method":"binlog","platform":"mysql_vm","database":"%s","tables":["%s.customers","%s.orders"],"ingestion_user":"%s","mysql_version":"%s","binlog_expire_logs_seconds":%s,"binlog_position":"%s","sample_rows":{"customers":%s,"orders":%s}}\n' \
+  "$DATABASE" "$DATABASE" "$DATABASE" "$LAKEFLOW_USER" "$version" "$expire_seconds" "$after" "$customers" "$orders"
+%{ else ~}
+customers="$(sql "$DATABASE" -e "SELECT COUNT(*) FROM customers")"
+orders="$(sql "$DATABASE" -e "SELECT COUNT(*) FROM orders")"
+printf 'LAKEFLOW_CDC_SETUP_RESULT {"status":"seeded","database":"%s","sample_rows":{"customers":%s,"orders":%s}}\n' "$DATABASE" "$customers" "$orders"
+%{ endif ~}

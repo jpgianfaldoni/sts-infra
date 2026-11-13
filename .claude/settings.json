@@ -8,6 +8,7 @@
       "Bash(./infra plan *)",
       "Bash(./infra endpoints aws status *)",
       "Bash(./infra endpoints azure status *)",
+      "Bash(./infra vm-setup-status *)",
       "Bash(./infra templates*)",
       "Bash(./infra explain *)",
       "Bash(./infra ls*)",

@@ -20,6 +20,27 @@ locals {
         password_key = "sql-database-admin-password"
         # Lakeflow Connect source setup; the ingestion login lives in Key Vault.
         cdc_method = local.lab_check_sql_scope != null && local.sql_database_lakeflow && local.key_vault_enabled ? "sqlserver_ct" : null
+        # Key Vault secret names allow hyphens but not underscores.
+        cdc_username_key = "sql-database-lakeflow-username"
+        cdc_password_key = "sql-database-lakeflow-password"
+      }
+    } : {},
+    var.features.mysql_flexible_server ? {
+      mysql_flexible_server = {
+        engine       = local.lab_check_sql_scope == null ? "tcp" : "mysql"
+        classic      = var.mysql_flexible_server.workspace_peering_enabled ? "peering" : "none"
+        serverless   = var.connectivity.mysql_flexible_server.serverless
+        host         = module.mysql_flexible_server[0].host
+        port         = module.mysql_flexible_server[0].port
+        database     = module.mysql_flexible_server[0].database_name
+        seed_file    = local.lab_check_sql_scope == null ? null : module.mysql_flexible_server[0].seed_file
+        secret_scope = local.lab_check_sql_scope
+        username_key = "mysql-flexible-server-admin-username"
+        password_key = "mysql-flexible-server-admin-password"
+        cdc_method   = local.lab_check_sql_scope != null && local.mysql_flexible_server_lakeflow ? "mysql_binlog" : null
+        # Key Vault secret names allow hyphens but not underscores.
+        cdc_username_key = "mysql-flexible-server-lakeflow-username"
+        cdc_password_key = "mysql-flexible-server-lakeflow-password"
       }
     } : {},
   )
@@ -42,8 +63,8 @@ locals {
           password_key     = config.engine == "tcp" ? null : config.password_key
           run_after        = compute == "serverless" && config.classic != "none" ? "${source}_classic" : null
           cdc_method       = config.cdc_method
-          cdc_username_key = config.cdc_method == null ? null : "${source}-lakeflow-username"
-          cdc_password_key = config.cdc_method == null ? null : "${source}-lakeflow-password"
+          cdc_username_key = config.cdc_method == null ? null : config.cdc_username_key
+          cdc_password_key = config.cdc_method == null ? null : config.cdc_password_key
         }
       } if config[compute] != "none"
     ]

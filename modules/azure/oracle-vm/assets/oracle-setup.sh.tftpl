@@ -1,0 +1,185 @@
+#!/bin/bash
+# Installs Oracle Database Free on the VM and prepares it for Lakeflow Connect.
+# Azure VM Run Command runs it as root through the VM agent, so no network path
+# to Oracle is needed. Parameters arrive as environment variables. It is safe
+# to rerun: every step checks its state first.
+set -euo pipefail
+
+CDB='${cdb_service}'
+PDB='${pdb_service}'
+RPM_URL='${rpm_url}'
+DOCS_URL='https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/oracle-integrated-setup'
+ORACLE_HOME=/opt/oracle/product/23ai/dbhomeFree
+WORK=/opt/oracle/lakeflow-setup
+
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
+fail() { echo "LAKEFLOW_CDC_SETUP_FAILED $*"; exit 1; }
+trap 'fail "command failed at line $LINENO: $BASH_COMMAND"' ERR
+
+[[ "$ORACLE_PASSWORD" =~ ^[A-Za-z0-9!#%*()_=+-]{8,30}$ ]] || fail "the generated Oracle password has characters SQL literals cannot take"
+[[ "$LAKEFLOW_PASSWORD" =~ ^[A-Za-z0-9!#%*()_=+-]{8,30}$ ]] || fail "the generated Lakeflow password has characters SQL literals cannot take"
+[[ "$LAKEFLOW_USER" =~ ^C##[A-Z][A-Z0-9_]{0,25}$ ]] || fail "the Lakeflow user must be an uppercase common user (C##...)"
+
+# Runs SQL from standard input as SYSDBA, in CDB$ROOT or the container given.
+sqlplus_as_sysdba() {
+  local container="$${1:-}"
+  {
+    echo "WHENEVER SQLERROR EXIT FAILURE"
+    echo "SET SERVEROUTPUT ON SIZE UNLIMITED FEEDBACK OFF HEADING OFF PAGESIZE 0 LINESIZE 400 VERIFY OFF"
+    [[ -z "$container" ]] || echo "ALTER SESSION SET CONTAINER = $container;"
+    cat
+    echo "EXIT"
+  } | su - oracle -c "ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$CDB $ORACLE_HOME/bin/sqlplus -s -L / as sysdba"
+}
+query() { sqlplus_as_sysdba "$${2:-}" <<<"$1" | tr -d '[:space:]'; }
+
+if ! rpm -q oracle-database-free-23ai >/dev/null 2>&1; then
+  log "Installing the Oracle Database Free prerequisites."
+  dnf -y -q install oracle-database-preinstall-23ai
+  log "Downloading Oracle Database Free from $RPM_URL."
+  curl -fsSL --retry 3 -o /tmp/oracle-database-free.rpm "$RPM_URL"
+  dnf -y -q localinstall /tmp/oracle-database-free.rpm
+  rm -f /tmp/oracle-database-free.rpm
+fi
+
+# The oracle user exists once the packages are installed. Files that may hold a
+# password live only in this oracle-owned directory and are removed on exit.
+install -d -o oracle -g oinstall -m 700 "$WORK"
+cleanup() { rm -f "$WORK/seed.sql" "$WORK/dbx-oracle-setup-package.sql" "$WORK/user.sql" "$WORK/check.sql"; }
+trap cleanup EXIT
+
+# Oracle's configure script passes the dbca command line to su unquoted
+# ("su -s /bin/bash oracle -c $DBCA_CLI"), so su reads dbca's options as its
+# own and fails ("invalid option -- 't'"). The script takes its su from $SU;
+# this one joins everything after -c back into the single command it was.
+cat > /usr/local/sbin/oracle-configure-su <<'WRAPPER'
+#!/bin/bash
+args=()
+while [[ $# -gt 0 && "$1" != -c ]]; do args+=("$1"); shift; done
+[[ $# -gt 0 ]] && shift
+exec /bin/su "$${args[@]}" -c "$*"
+WRAPPER
+chmod 755 /usr/local/sbin/oracle-configure-su
+
+# dbca records the database in /etc/oratab only when it succeeds.
+if ! grep -q "^$CDB:" /etc/oratab 2>/dev/null; then
+  listener_config="$ORACLE_HOME/network/admin/listener.ora"
+  if [[ -f "$listener_config" ]]; then
+    # A failed earlier attempt left its listener; let configure create it again.
+    su - oracle -c "$ORACLE_HOME/bin/lsnrctl stop" >/dev/null 2>&1 || true
+    mv "$listener_config" "$listener_config.failed-$(date -u +%Y%m%d%H%M%S)"
+  fi
+  log "Creating the database (this takes about 15 minutes)."
+  printf '%s\n%s\n' "$ORACLE_PASSWORD" "$ORACLE_PASSWORD" |
+    SU=/usr/local/sbin/oracle-configure-su /etc/init.d/oracle-free-23ai configure
+fi
+systemctl enable oracle-free-23ai >/dev/null 2>&1 || true
+if [[ "$(query "SELECT status FROM v\$instance;" 2>/dev/null || true)" != OPEN ]]; then
+  /etc/init.d/oracle-free-23ai start
+fi
+if systemctl is-active --quiet firewalld; then
+  firewall-cmd --quiet --permanent --add-port=1521/tcp
+  firewall-cmd --quiet --reload
+fi
+
+%{ if lakeflow ~}
+if [[ "$(query "SELECT log_mode FROM v\$database;")" != ARCHIVELOG ]]; then
+  log "Turning on ARCHIVELOG mode (the database restarts once)."
+  sqlplus_as_sysdba <<'SQL'
+SHUTDOWN IMMEDIATE
+STARTUP MOUNT
+ALTER DATABASE ARCHIVELOG;
+ALTER DATABASE OPEN;
+ALTER PLUGGABLE DATABASE ALL OPEN;
+ALTER PLUGGABLE DATABASE ALL SAVE STATE;
+SQL
+fi
+if [[ "$(query "SELECT supplemental_log_data_min FROM v\$database;")" == NO ]]; then
+  log "Turning on minimal supplemental logging."
+  sqlplus_as_sysdba <<<"ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;"
+fi
+log "Keeping archive logs for two days, as Lakeflow Connect recommends."
+echo "CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 2 DAYS;" |
+  su - oracle -c "ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$CDB $ORACLE_HOME/bin/rman target /" >/dev/null
+%{ endif ~}
+
+log "Loading the sample data into the LAB schema of $PDB."
+echo '${seed_sql_base64}' | base64 -d > "$WORK/seed.sql"
+chown oracle:oinstall "$WORK/seed.sql"
+sqlplus_as_sysdba "$PDB" <<<"@$WORK/seed.sql"
+
+%{ if lakeflow ~}
+log "Turning on full supplemental logging for the sample tables."
+sqlplus_as_sysdba "$PDB" <<'SQL'
+DECLARE
+    found INTEGER;
+BEGIN
+    FOR t IN (SELECT 'CUSTOMERS' AS name FROM dual UNION ALL SELECT 'ORDERS' FROM dual) LOOP
+        SELECT COUNT(*) INTO found FROM dba_log_groups
+        WHERE owner = 'LAB' AND table_name = t.name AND log_group_type = 'ALL COLUMN LOGGING';
+        IF found = 0 THEN
+            EXECUTE IMMEDIATE 'ALTER TABLE LAB.' || t.name || ' ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS';
+        END IF;
+    END LOOP;
+END;
+/
+SQL
+
+log "Downloading the Databricks Oracle setup package."
+package_path="$(curl -fsSL --retry 3 "$DOCS_URL" | grep -oE '/[A-Za-z0-9/_-]*dbx-oracle-setup-package-[0-9a-f]+\.sql' | head -1)"
+[[ -n "$package_path" ]] || fail "could not find the dbx-oracle-setup-package.sql link on $DOCS_URL"
+curl -fsSL --retry 3 -o "$WORK/dbx-oracle-setup-package.sql" "https://docs.databricks.com$package_path"
+grep -q dbx_oracle_setup_util "$WORK/dbx-oracle-setup-package.sql" || fail "the downloaded file is not the Databricks Oracle setup package"
+chown oracle:oinstall "$WORK/dbx-oracle-setup-package.sql"
+log "Installing the setup package in CDB\$ROOT."
+sqlplus_as_sysdba <<<"@$WORK/dbx-oracle-setup-package.sql"
+[[ "$(query "SELECT status FROM dba_objects WHERE owner = 'SYS' AND object_name = 'DBX_ORACLE_SETUP_UTIL' AND object_type = 'PACKAGE BODY';")" == VALID ]] ||
+  fail "the Databricks Oracle setup package did not compile"
+
+log "Creating the common user $LAKEFLOW_USER and granting LogMiner and sample-table access."
+tablespace="$(query "SELECT NVL(MAX(tablespace_name), 'SYSAUX') FROM dba_tablespaces WHERE tablespace_name = 'USERS';")"
+# The password goes through a file only the oracle user can read, never a command line.
+umask 077
+cat > "$WORK/user.sql" <<SQL
+BEGIN
+    sys.dbx_oracle_setup_util.create_user('$LAKEFLOW_USER', '$LAKEFLOW_PASSWORD', '$tablespace', 'TEMP');
+END;
+/
+ALTER USER $LAKEFLOW_USER IDENTIFIED BY "$LAKEFLOW_PASSWORD" CONTAINER = ALL;
+BEGIN
+    sys.dbx_oracle_setup_util.grant_permissions('$LAKEFLOW_USER');
+    sys.dbx_oracle_setup_util.grant_select_on_table('$LAKEFLOW_USER', 'LAB', 'CUSTOMERS', '$PDB');
+    sys.dbx_oracle_setup_util.grant_select_on_table('$LAKEFLOW_USER', 'LAB', 'ORDERS', '$PDB');
+    sys.dbx_oracle_setup_util.validate_setup('$LAKEFLOW_USER');
+END;
+/
+SQL
+chown oracle:oinstall "$WORK/user.sql"
+sqlplus_as_sysdba <<<"@$WORK/user.sql" | tail -20
+rm -f "$WORK/user.sql"
+
+log "Checking access as $LAKEFLOW_USER over the listener."
+# sqlplus reads the logon from the first input line, so the password stays off
+# the command line.
+cat > "$WORK/check.sql" <<SQL
+$LAKEFLOW_USER/"$LAKEFLOW_PASSWORD"@//127.0.0.1:1521/$PDB
+WHENEVER SQLERROR EXIT FAILURE
+SET FEEDBACK OFF HEADING OFF PAGESIZE 0
+SELECT (SELECT COUNT(*) FROM LAB.CUSTOMERS) || ',' || (SELECT COUNT(*) FROM LAB.ORDERS) || ',' || (SELECT log_mode FROM v\$database) FROM dual;
+EXIT
+SQL
+chown oracle:oinstall "$WORK/check.sql"
+checked="$(su - oracle -c "ORACLE_HOME=$ORACLE_HOME $ORACLE_HOME/bin/sqlplus -s -L < $WORK/check.sql" | tr -d '[:space:]')"
+rm -f "$WORK/check.sql"
+IFS=, read -r customers orders log_mode <<<"$checked"
+[[ "$log_mode" == ARCHIVELOG && "$customers" =~ ^[0-9]+$ ]] || fail "the Lakeflow user could not read the sample tables ($checked)"
+supplemental="$(query "SELECT supplemental_log_data_min FROM v\$database;")"
+version="$(query "SELECT version_full FROM v\$instance;")"
+
+printf 'LAKEFLOW_CDC_SETUP_RESULT {"status":"ready","method":"logminer","platform":"oracle_vm","cdb_service":"%s","pdb_service":"%s","tables":["LAB.CUSTOMERS","LAB.ORDERS"],"ingestion_user":"%s","log_mode":"%s","supplemental_log_data_min":"%s","oracle_version":"%s","sample_rows":{"customers":%s,"orders":%s}}\n' \
+  "$CDB" "$PDB" "$LAKEFLOW_USER" "$log_mode" "$supplemental" "$version" "$customers" "$orders"
+%{ else ~}
+counts="$(query "SELECT (SELECT COUNT(*) FROM LAB.CUSTOMERS) || ',' || (SELECT COUNT(*) FROM LAB.ORDERS) FROM dual;" "$PDB")"
+IFS=, read -r customers orders <<<"$counts"
+printf 'LAKEFLOW_CDC_SETUP_RESULT {"status":"seeded","cdb_service":"%s","pdb_service":"%s","sample_rows":{"customers":%s,"orders":%s}}\n' "$CDB" "$PDB" "$customers" "$orders"
+%{ endif ~}

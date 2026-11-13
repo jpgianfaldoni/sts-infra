@@ -23,6 +23,8 @@ SMOKE = {
     "postgresql": "import pg8000.native, scramp, dateutil; pg8000.native.Connection; pg8000.native.DatabaseError; "
     "pg8000.native.InterfaceError; scramp.make_channel_binding",
     "sqlserver": "import pymssql; pymssql.connect; pymssql.Error",
+    "mysql": "import pymysql; pymysql.connect; pymysql.err.MySQLError",
+    "oracle": "import oracledb; oracledb.connect; oracledb.Error; oracledb.is_thin_mode()",
 }
 
 # Resolves each installed distribution's requirements against the others.

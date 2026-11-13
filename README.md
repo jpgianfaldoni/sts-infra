@@ -1,336 +1,273 @@
-# Build your Databricks infrastructure scenario
+# sts-infra: disposable Databricks labs on AWS and Azure
 
-This project creates disposable, customizable Databricks environments for
-learning, testing, and demonstrations. Choose the cloud resources and
-network paths you need, then deploy the complete scenario with Terraform.
+Describe the lab you need, for example "an AWS workspace and a private Postgres
+database with sample data that serverless compute reaches privately", and this
+project builds it, proves every network path works, and tears it down when you
+are done.
 
-## Why this project exists
+Each lab is a Databricks workspace plus the data sources and private network
+paths you choose: databases (PostgreSQL, SQL Server, MySQL, Oracle), Kafka,
+RabbitMQ, a simulated on-premises network, and the peering, PrivateLink, NCC,
+or Transit Gateway pieces that connect them to classic or serverless compute.
+Databases come loaded with sample tables, and the ones that support it are
+prepared for Lakeflow Connect CDC.
 
-Many Databricks scenarios require more than configuring a workspace. They also
-require networking between different compute types and private data
-sources, for example:
+You can use it two ways, and they run the same steps:
 
-- classic compute connecting to a database in the same cloud environment;
-- serverless compute connecting to a private cloud resource;
-- classic or serverless compute connecting to an on-premises network;
-- Lakeflow Connect using CDC or query-based ingestion over one of those paths;
-- workspace setup and migration from classic to serverless compute.
+- **[Ask an agent](#use-it-with-an-agent)** in plain English. The agent picks a
+  template, explains what will be built, deploys it, and checks it. You do the
+  browser logins and approve what it runs.
+- **[Run the commands](#use-it-with-commands)** yourself. Everything goes
+  through one CLI, `./infra`.
 
-These scenarios are difficult to study or demonstrate without access to an
-environment that resembles the target architecture. Building one manually
-is slow, inconsistent, and easy to get wrong. Reusing an existing environment
-can also hide important setup steps or create conflicts between exercises.
+## Requirements
 
-## The solution
+- Terraform 1.11 or newer, the Databricks CLI, and Python 3.9 or newer.
+- AWS: AWS CLI v2 and an IAM Identity Center (SSO) login to the account.
+- Azure: the Azure CLI and access to the subscription.
+- A Databricks account where you can create workspaces (account admin).
 
-This repository is a **build-your-own-scenario** toolkit. Its modular Terraform
-creates the Databricks workspace, source systems, cloud networking, and private
-connectivity needed to reproduce the desired architecture in a disposable lab.
+`./infra doctor <aws|azure>` checks the tools.
 
-An environment file answers three questions:
+## Use it with an agent
 
-1. Which cloud should host the lab?
-2. Which resources should be created?
-3. How should Databricks compute reach each resource?
+Open the repository in a coding agent, such as Claude Code, and say what you
+want:
 
-Feature flags enable resources such as PostgreSQL, SQL Server, RabbitMQ, Kafka,
-and a simulated on-premises network. Connectivity settings independently select the
-path for classic and serverless compute. Supporting resources such as VPC
-peering, load balancers, endpoint services, Network Connectivity
-Configurations (NCCs), private endpoints, or Transit Gateway are derived from
-those choices.
+> I need an Azure workspace and a SQL Server on a VM, set up for Lakeflow
+> Connect CDC, with no network path between them.
 
-Terraform provisions the infrastructure and network path, and
-`./infra verify` loads sample tables into the databases and proves each
-configured path works by running a check from the matching compute type.
-Application-level steps such as enabling database CDC or creating the Lakeflow
-connection and pipeline are completed afterward using the supplied assets and
-guides.
+> Build an AWS lab where serverless compute reads a private MySQL database over
+> PrivateLink.
 
-The intended way to use the project is through a coding agent: describe the
-lab you want, and the agent picks a template, explains what will be built,
-handles the browser logins, deploys, and verifies it. `AGENTS.md` and the
-`deploy-scenario` skill define that workflow; every step is also a plain
-`./infra` command you can run yourself.
+> Tear down my MySQL lab.
 
-## Example scenarios
+The agent follows [`AGENTS.md`](AGENTS.md). In Claude Code, the
+`deploy-scenario` skill and the permission rules in `.claude/` also apply. The
+agent:
 
-| Goal | Example deployment result |
-| --- | --- |
-| Demonstrate Lakeflow Connect SQL Server CDC on AWS | Databricks workspace + private RDS SQL Server + classic VPC peering; use the supplied SQL seed asset to finish the CDC setup |
-| Train on serverless connectivity to PostgreSQL on AWS | Databricks workspace + private RDS PostgreSQL + internal NLB + endpoint service + NCC private endpoint |
-| Stream synthetic Kafka events from classic and serverless compute | Databricks workspace + single private Kafka broker + continuous producer + classic peering or PrivateLink + serverless NCC private endpoint |
-| Demonstrate Lakeflow Connect PostgreSQL query-based ingestion on AWS | Databricks workspace + private PostgreSQL + selected classic or serverless network path; create the connection and pipeline after deployment |
-| Reproduce classic access to an on-premises service | Databricks workspace + isolated test-host VPC + Transit Gateway, attachments, routes, and security rules |
-| Compare classic and serverless access to the same private service | Classic path through peering or Transit Gateway plus a separate serverless path through PrivateLink and an NCC |
-| Practice Azure serverless Private Link | VNet-injected Azure Databricks workspace + private Azure SQL with sample data + NCC private endpoint, approved automatically |
+1. Picks the closest template and asks only what it cannot infer (which
+   account, classic or serverless compute, region), offering a default for
+   each.
+2. Shows you what will be built, each network path, the build time, and the
+   cost tier.
+3. Starts the browser logins and waits for you to finish them.
+4. Shows the plan summary, including every resource that would be replaced or
+   deleted, before applying or destroying.
+5. Deploys, approves the private endpoints this lab requested, and runs the
+   checks that prove each path works.
 
-## What can be deployed
+What you do:
 
-### AWS
+- **Log in when a browser window opens** (AWS SSO, Databricks OAuth, or
+  `az login`). Credentials stay in those CLIs; the agent never sees them.
+- **Approve the commands that change things.** Read-only commands (`doctor`,
+  `explain`, `plan`, `status`) run without asking. `setup`, `apply`, `verify`,
+  and `destroy` ask first.
+- **Ask for the teardown** when you are done. Labs bill by the hour.
 
-| Component | What it creates |
-| --- | --- |
-| `workspace` | Databricks workspace in a dedicated VPC, private classic-compute subnets, NAT, root S3 storage, and cross-account IAM |
-| `unity_catalog` | Unity Catalog metastore, storage root, storage credential, external location, and initial catalog |
-| `glue_federation` | Private S3 sample data, Glue database and table, IAM roles, and optional Unity Catalog credentials, external location, connection, and foreign catalog |
-| `rds_postgres` | Private Amazon RDS for PostgreSQL |
-| `rds_sql_server` | Private Amazon RDS for SQL Server, suitable for Lakeflow Connect CDC labs |
-| `aurora_postgres` | Private Aurora PostgreSQL cluster with writer and reader endpoints |
-| `aurora_proxy` | RDS Proxy for Aurora PostgreSQL |
-| `rabbitmq` | Private self-managed RabbitMQ on EC2 |
-| `kafka` | Private single-broker Kafka lab on EC2 with SASL credentials and a continuous synthetic event producer |
-| `simulated_on_prem` | Isolated private network and HTTP test host representing an on-premises environment |
+To save questions later, tell the agent once which account and Unity Catalog
+metastore your labs use; it stores them as a named target. You can also ask
+"what labs do I have running?" or "is my lab still healthy?" at any time.
 
-AWS data sources are created in dedicated VPCs. Enabling a source does not
-implicitly connect it to Databricks.
+## Use it with commands
 
-| Compute | Connectivity choices |
-| --- | --- |
-| Classic to cloud data sources | `none`, `peering`, `private_link` |
-| Serverless to cloud data sources | `none`, `private_link` |
-| Classic to simulated on-premises | `none`, `transit_gateway` |
-| Serverless to simulated on-premises | `none`, `private_link` |
+Every step below is what the agent runs for you. Run each command from the
+repository root.
 
-### Azure
+### 1. Name your account once
 
-| Component | What it creates |
-| --- | --- |
-| `workspace` | Premium VNet-injected Azure Databricks workspace with secure cluster connectivity, NAT, and a back-end private endpoint |
-| `test_vm` | Entra-accessible Linux VM in the workspace VNet for private DNS and front-end Private Link tests |
-| `external_volume_storage` | ADLS Gen2 storage, an access connector, configurable Unity Catalog metastore assignment, and an external volume |
-| `custom_dns` | A DNS forwarder VM (forwarding to Azure DNS) in a dedicated subnet, set as the workspace VNet's custom DNS server |
-| `sql_database` | Private Azure SQL logical server and database with a private endpoint and private DNS |
-| `sql_server_vm` | Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise |
-
-Serverless compute reaches Azure SQL through an NCC private endpoint
-(`connectivity.sql_database.serverless = "private_link"`), and classic compute
-through VNet peering (`sql_database.workspace_peering_enabled = true`). See the
-[Azure serverless SQL guide](guides/azure/serverless/sql-database/private-link.md)
-for the design and the manual equivalent.
-
-Both clouds also create a `lab_check` job when a source has at least one
-compute path: `./infra verify` runs it to load the sample tables `customers`
-and `orders` (PostgreSQL, RDS SQL Server, Azure SQL) and to check every
-configured classic and serverless path.
-
-## Customize a scenario
-
-### Name your accounts once
-
-A target records the non-secret identifiers of an account you deploy into, so
-environment files refer to it by name instead of repeating IDs:
+A target stores the non-secret IDs of an account, so lab files refer to it by
+name:
 
 ```bash
-./infra targets add field-aws --cloud aws \
+./infra targets add my-aws --cloud aws \
   --aws-account-id 123456789012 --databricks-account-id <uuid> --region us-west-2 \
   --sso-start-url https://<org>.awsapps.com/start --sso-region us-east-1 --sso-role-name <role> \
-  --metastore <shared-metastore> --description "Field engineering sandbox"
-./infra targets add field-azure --cloud azure \
+  --metastore <shared-metastore>
+./infra targets add my-azure --cloud azure \
   --subscription-id <uuid> --databricks-account-id <uuid> --location westus2
-./infra targets
 ```
 
-Targets live in `~/.config/sts-infra/targets.json` (override with
-`STS_INFRA_TARGETS` to share a team file). AWS environments must pin their
-account, through a target or `aws_account_id`, so nothing is deployed to the
-wrong one.
+Targets live in `~/.config/sts-infra/targets.json`. `--metastore` is optional;
+use it when the account has several metastores in the region.
 
-### Create the environment
+### 2. Create a lab from a template
 
 ```bash
-./infra templates
-./infra new aws my-lab --template workspace-postgres --target field-aws
-./infra explain aws environments/local/my-lab.tfvars
+./infra templates                                        # list every template
+./infra new aws my-lab --template serverless-postgres --target my-aws
+./infra explain aws environments/local/my-lab.tfvars     # what gets built, and any problems
 ```
 
-`new` copies the template into the Git-ignored `environments/local`
-directory; do not edit the example files directly. `explain` evaluates the
-file with Terraform and prints what gets built, each network path, the checks
-`verify` will run, the typical build time and cost tier, and any problems.
-
-Then adjust the components and connectivity in the local file. This example
-creates one PostgreSQL instance that classic compute reaches through VPC
-peering and serverless compute reaches through an NCC private endpoint:
+`new` copies the template to `environments/local/my-lab.tfvars`. Git ignores
+that folder, so edit the file freely. A lab file turns components on and picks
+a path for each kind of compute:
 
 ```hcl
-target = "field-aws"
+target = "my-aws"
 
 features = {
-  workspace     = true
-  unity_catalog = true
-  rds_postgres  = true
+  workspace    = true
+  rds_postgres = true
 }
 
 connectivity = {
   rds_postgres = {
-    classic    = "peering"
-    serverless = "private_link"
+    classic    = "peering"       # none | peering | private_link
+    serverless = "private_link"  # none | private_link
   }
 }
 ```
 
-Set both modes to `none` when you want the workspace and database to remain
-disconnected for a networking exercise. On AWS, setting `region` (or the
-target's region) is normally enough; the deployment derives two available
-zones unless you provide them explicitly.
+Set both paths to `none` for a lab where you build the connection yourself.
 
-Resource names derive from the deployment ID (the tfvars file name) unless you
-set `name_prefix`, so two copies of the same template get distinct names.
-Examples use `metastore_mode = "auto"`, which reuses the only metastore in the
-region or creates one; see
-[metastore selection](guides/operations/deployment.md#metastore-selection) for
-shared accounts with many metastores; a target's `--metastore` replaces `auto`
-in new environments. Kafka and RabbitMQ examples set
-`ephemeral_credentials = true` so broker passwords are written only to Secrets
-Manager and never to Terraform state.
-
-Available templates include:
-
-| Template | Scenario |
-| --- | --- |
-| `aws/workspace-postgres.tfvars` | Classic compute reads a private PostgreSQL database with sample data over VPC peering |
-| `aws/serverless-postgres.tfvars` | Serverless compute reads a private PostgreSQL database with sample data over PrivateLink |
-| `aws/serverless-sql-server.tfvars` | Serverless compute reads a private RDS SQL Server database with sample data over PrivateLink |
-| `aws/glue-federation.tfvars` | AWS-only S3, Glue catalog, sample table, and credential roles for a manual federation setup |
-| `aws/glue-federation-with-databricks.tfvars` | End-to-end Glue federation including the workspace and Unity Catalog connectivity resources |
-| `aws/workspace-backend-private-link.tfvars` | Classic workspace whose compute plane reaches the Databricks control plane through back-end PrivateLink |
-| `aws/workspace-postgres-no-connectivity.tfvars` | Workspace and PostgreSQL in disconnected VPCs |
-| `aws/all-services-private-link.tfvars` | All AWS data sources through PrivateLink for classic and serverless compute |
-| `aws/workspace-kafka-streaming.tfvars` | Kafka streaming from classic compute through peering and serverless compute through NCC PrivateLink |
-| `aws/workspace-simulated-on-prem-disconnected.tfvars` | Workspace and simulated on-premises network without connectivity |
-| `aws/workspace-simulated-on-prem-transit-gateway.tfvars` | Classic compute connected to simulated on-premises through Transit Gateway |
-| `aws/workspace-simulated-on-prem-serverless-private-link.tfvars` | Serverless compute connected to simulated on-premises through an NCC private endpoint |
-| `azure/serverless-sql.tfvars` | Serverless compute reads a private Azure SQL database with sample data over Private Link |
-| `azure/workspace-sql.tfvars` | VNet-injected Azure workspace and private Azure SQL Database |
-| `azure/workspace-sql-serverless-private-link.tfvars` | Azure SQL from serverless (Private Link) and classic compute (peering), plus a test VM |
-| `azure/workspace-front-end-private-link.tfvars` | Serverless-capable workspace, test VM, and UI/API plus browser-authentication private endpoints |
-| `azure/workspace-private-storage-volume.tfvars` | Workspace and external volume backed by locked-down ADLS Gen2 storage, intentionally without a compute network path |
-| `azure/workspace-custom-dns.tfvars` | VNet-injected workspace whose VNet resolves names through a custom DNS server VM |
-
-## Deploy the scenario
-
-Terraform 1.11 or newer is required. Use `./infra` for validation, planning,
-deployment, verification, endpoint operations, and destruction. It validates
-authentication and applies only the exact saved plan that was reviewed.
+### 3. Log in
 
 ```bash
-# Check authentication; fix anything missing with a browser login.
-./infra doctor aws environments/local/my-lab.tfvars
-./infra setup aws environments/local/my-lab.tfvars --yes
+./infra doctor aws environments/local/my-lab.tfvars       # what is missing
+./infra setup aws environments/local/my-lab.tfvars --yes  # opens the browser logins
+```
 
-./infra plan aws environments/local/my-lab.tfvars
-# Review the saved-plan summary before continuing.
+`setup` reuses or creates the AWS SSO and Databricks OAuth profiles and saves
+only profile names and account IDs. Other labs in the same accounts need no
+more setup. On Azure, one `az login` covers the subscription, the Databricks
+account, and the workspace.
+
+### 4. Deploy
+
+```bash
+./infra plan aws environments/local/my-lab.tfvars    # review the summary, every replace: and delete: line
 ./infra apply aws environments/local/my-lab.tfvars
+```
+
+`apply` runs only the plan you reviewed. It refuses if the lab file, the code,
+or your login changed since the plan. After apply, it approves exactly the
+serverless private endpoints this lab requested.
+
+A new AWS workspace deploys in two stages, because Unity Catalog and the lab
+check job need a login to a workspace that does not exist yet. After the first
+apply, `./infra` prints the next three commands: `setup` (workspace login),
+`plan`, and `apply`. Azure deploys in one stage.
+
+### 5. Check every path
+
+```bash
 ./infra verify aws environments/local/my-lab.tfvars
 ```
 
-`setup --yes` asks no questions. It reuses or creates the AWS IAM Identity
-Center and Databricks OAuth profiles, opens the browser logins that are needed,
-and writes only account identifiers and profile names to
-`~/.config/sts-infra/auth.json`. Credentials stay in the CLI caches. A new
-environment in an account you have already set up needs no further setup. On
-Azure, a single `az login` covers the subscription, the Databricks account, and
-the workspace.
+`verify` loads the sample tables `customers` and `orders`, and runs a check
+from each compute type over each path. It prepares Lakeflow Connect CDC where
+enabled and prints one line per path:
 
-**A new AWS workspace deploys in two stages.** The workspace-level resources
-(Unity Catalog, Glue catalogs, the lab check job) need a login to the
-workspace, which cannot exist before the workspace does. The first plan reports
-`Deployment stage: foundation (1 of 2)`; after its apply, `./infra` prints the
-`setup` command for the workspace login, and the next plan and apply add the
-rest. Nothing needs to be toggled in the tfvars.
-
-**Serverless endpoints are approved automatically.** After apply, `./infra`
-approves exactly the serverless private endpoint connections the deployment
-requested (AWS endpoint-service connections, Azure private endpoint
-connections). Set `endpoint_approval = "manual"` to leave them pending and
-practice the step with `./infra endpoints`.
-
-**`verify` proves the paths.** It copies the database credentials into a
-Databricks secret scope (AWS Secrets Manager values flow through pipes and are
-never printed or stored in Terraform state; Azure uses the Key Vault-backed
-scope), waits for serverless endpoint rules to become `ESTABLISHED`, runs the
-lab check job, and prints one line per path with the sample-data row counts.
-It exits `13` when a check fails, with the failing stage and a hint.
-
-`./infra doctor <cloud> <tfvars> --json` reports each identity with a stable
-exit code (`0` ready, `10` browser login needed, `11` wrong account, profile,
-or target, or an unpinned AWS account, `12` missing tool), which makes the
-workflow straightforward for coding agents. `./infra status <cloud> <tfvars>
---json` returns the next step for a deployment, and `./infra ls` lists every
-local deployment with its age. See
-[authentication](guides/operations/authentication.md) for details, SSO profile
-creation, overrides, and automation.
-
-To seed a locked-down Azure external volume, use the temporary-access workflow:
-
-```bash
-./infra seed-access-plan azure environments/local/my-azure.tfvars
-./infra seed-access-apply azure environments/local/my-azure.tfvars
-./infra seed azure environments/local/my-azure.tfvars --source ./sample-data
-# Review the lockdown plan created by seed, then apply it.
-./infra apply azure environments/local/my-azure.tfvars
+```text
+[pass] rds_postgres from serverless compute over private_link: sample data customers=3, orders=5
 ```
 
-The temporary plan enables the public endpoint only for the operator's `/32`
-address and grants the signed-in Azure principal Blob Data Contributor. `seed`
-uploads with Azure OAuth, records and verifies SHA-256 metadata, then creates a
-normal saved plan that removes the operator role and restores the configured
-network lockdown. See the [deployment workflow](guides/operations/deployment.md#seed-a-locked-down-azure-external-volume).
+A failed check names the stage that failed (`dns`, `tcp`, `login`, `cdc`, and
+so on) and suggests a fix. Serverless private endpoints can take about 10
+minutes after approval before traffic flows, so rerun `verify` if a fresh lab
+fails at `tcp`.
 
-With `endpoint_approval = "manual"`, review and approve serverless endpoint
-connections yourself:
+### 6. Tear it down
 
 ```bash
-./infra endpoints aws status environments/local/my-lab.tfvars
-./infra endpoints aws accept environments/local/my-lab.tfvars \
-  --service-id vpce-svc-... \
-  --endpoint-id vpce-...
-./infra endpoints azure status environments/local/my-azure.tfvars
-./infra endpoints azure approve environments/local/my-azure.tfvars --connection-id <id>
-```
-
-## Destroy the scenario
-
-These labs create billable cloud resources. Destroy them when the exercise is
-finished:
-
-```bash
-./infra ls
-./infra destroy-plan aws environments/local/my-lab.tfvars
-# Review the saved destroy-plan summary before continuing.
+./infra destroy-plan aws environments/local/my-lab.tfvars   # review what will be deleted
 ./infra destroy aws environments/local/my-lab.tfvars --confirm destroy-aws
 ```
 
-Before an AWS destroy, configure workspace authentication so `./infra` can
-terminate active clusters. With `endpoint_approval = "auto"`, the confirmed
-destroy also rejects the serverless endpoint connections on the deployment's
-own endpoint services so AWS can delete them; with `"manual"`, reject them
-yourself first. The templates set `allow_destructive_demo_cleanup = true`
-because labs are disposable: destroy empties versioned buckets, lifts database
-deletion protection, and skips final snapshots. See the
-[deployment workflow](guides/operations/deployment.md#destroy) for the complete
-checklist.
+`./infra ls` lists every local lab and how long it has existed.
 
-## Safety and project structure
+### Other commands
 
-- Never commit local environment files, credentials, secrets, Terraform state,
-  or saved plans.
-- Local deployments use isolated state under
-  `.state/<cloud>/<deployment-id>`.
-- `components.json` is the machine-readable catalog of components and supported
-  connectivity modes.
-- `AGENTS.md` defines the guardrails for infrastructure agents, and
-  `.claude/` holds the matching Claude Code permissions and the
-  `deploy-scenario` skill.
-- `modules/` contains the reusable cloud components; `modules/shared` holds
-  the ones both clouds use, such as the lab check job.
-- `lib/infra_scenario.py` implements `templates`, `new`, `explain`, `ls`,
-  `status`, and `targets`, and parses environment files for `./infra`
-  (Python standard library only).
-- `guides/` contains networking explanations, tutorials, authentication, state,
-  and deployment procedures.
+| Command | What it does |
+| --- | --- |
+| `./infra status <cloud> <tfvars>` | Where a lab stands and the next command to run |
+| `./infra output <cloud> <tfvars> --json` | Hostnames, IDs, and other outputs, with secrets redacted |
+| `./infra endpoints <cloud> status <tfvars>` | Serverless private endpoints and their approval state |
+| `./infra vm-setup-status azure <tfvars>` | Setup result of each database VM, including the failure line when one failed |
+| `./infra state-forget <cloud> <tfvars> <address> --confirm forget-<cloud>-<id>` | Drop a resource the cloud already deleted from the lab's state |
 
-Start with the [guides index](guides/README.md), the
-[AWS connectivity guide](guides/aws/connectivity.md), or the
-[deployment workflow](guides/operations/deployment.md).
+Run `./infra` with no arguments for the full list. Reporting commands such as
+`doctor`, `explain`, `status`, `ls`, and `verify` take `--json`, and the exit
+codes are stable: `0` ok, `10` browser login needed, `11` wrong account or
+profile, `12` missing tool, `13` a check failed.
+
+## What you can build
+
+`./infra templates` lists the starting points:
+
+| Cloud | Template | Scenario |
+| --- | --- | --- |
+| AWS | `workspace-postgres` | Classic compute reads a private PostgreSQL database over VPC peering |
+| AWS | `serverless-postgres` | Serverless compute reads a private PostgreSQL database over PrivateLink |
+| AWS | `serverless-sql-server` | Serverless compute reads a private RDS SQL Server database over PrivateLink |
+| AWS | `serverless-mysql` | Serverless compute reads private RDS for MySQL, prepared for Lakeflow Connect |
+| AWS | `serverless-oracle` | Serverless compute reads private RDS for Oracle, prepared for Lakeflow Connect |
+| AWS | `workspace-kafka-streaming` | Kafka streaming from classic (peering) and serverless (PrivateLink) compute |
+| AWS | `all-services-private-link` | Every AWS data source, from classic and serverless compute over PrivateLink |
+| AWS | `glue-federation-with-databricks` | Glue catalog federation end to end, including the Unity Catalog foreign catalog |
+| AWS | `glue-federation` | S3 sample data and a Glue catalog only, for a manual federation exercise |
+| AWS | `workspace-backend-private-link` | Classic compute reaches the control plane over back-end PrivateLink |
+| AWS | `workspace-postgres-no-connectivity` | Workspace and PostgreSQL in disconnected VPCs, to build the path yourself |
+| AWS | `workspace-simulated-on-prem-transit-gateway` | Classic compute reaches a simulated on-premises service through Transit Gateway |
+| AWS | `workspace-simulated-on-prem-serverless-private-link` | Serverless compute reaches a simulated on-premises service over PrivateLink |
+| AWS | `workspace-simulated-on-prem-disconnected` | Workspace and a simulated on-premises network, not connected |
+| Azure | `serverless-sql` | Serverless compute reads a private Azure SQL database over Private Link |
+| Azure | `serverless-mysql` | Serverless compute reads private Azure Database for MySQL, prepared for Lakeflow Connect |
+| Azure | `workspace-sql-serverless-private-link` | Azure SQL from serverless (Private Link) and classic (peering) compute, plus a test VM |
+| Azure | `workspace-sql-server-vm-lakeflow-cdc` | SQL Server on a VM, prepared for Lakeflow Connect CDC, with no network path |
+| Azure | `workspace-mysql-vm-lakeflow-cdc` | MySQL on a VM, prepared for Lakeflow Connect, with no network path |
+| Azure | `workspace-oracle-vm-lakeflow-cdc` | Oracle Database Free on a VM, prepared for Lakeflow Connect, with no network path |
+| Azure | `workspace-sql` | Workspace and a private Azure SQL database, not connected |
+| Azure | `workspace-front-end-private-link` | Workspace UI/API and browser login over front-end Private Link, tested from a VM |
+| Azure | `workspace-private-storage-volume` | External volume on locked-down ADLS Gen2 storage |
+| Azure | `workspace-custom-dns` | Workspace VNet that resolves names through a custom DNS server VM |
+
+Templates are combinations of components you can mix freely in a lab file:
+
+| Cloud | Components |
+| --- | --- |
+| AWS | `workspace`, `unity_catalog`, `glue_federation`, `rds_postgres`, `rds_sql_server`, `rds_mysql`, `rds_oracle`, `aurora_postgres`, `aurora_proxy`, `rabbitmq`, `kafka`, `simulated_on_prem` |
+| Azure | `workspace`, `test_vm`, `external_volume_storage`, `custom_dns`, `sql_database`, `sql_server_vm`, `mysql_flexible_server`, `mysql_vm`, `oracle_vm` |
+
+Every source starts disconnected; it gets a path only when the lab file asks
+for one. The networking pieces (peering, PrivateLink endpoint services, NCC
+rules, Transit Gateway, Key Vault) and the lab check job are added
+automatically from the paths you choose.
+[`components.json`](components.json) describes each component, its network
+paths, build time, and cost.
+
+## Good to know
+
+- **Labs cost money.** Destroy them when you are done. Templates set
+  `allow_destructive_demo_cleanup = true`, so destroy also empties buckets and
+  skips final database snapshots.
+- **Nothing secret is stored here.** Passwords live in AWS Secrets Manager or
+  Azure Key Vault, logins in the AWS, Azure, and Databricks CLIs, and lab files
+  and state stay out of Git.
+- **Each lab is isolated.** It has its own state under
+  `.state/<cloud>/<lab name>`, and resource names come from the lab name, so
+  two labs from the same template do not collide.
+- **AWS labs must name their account** (through a target or `aws_account_id`),
+  so nothing is deployed to the wrong one.
+
+## Learn more
+
+- [Guides index](guides/README.md): networking concepts and step-by-step
+  tutorials for each path.
+- [Deployment workflow](guides/operations/deployment.md): metastore selection,
+  seeding locked-down Azure storage, and the destroy checklist.
+- [Authentication](guides/operations/authentication.md): profiles, overrides,
+  and automation.
+- [`AGENTS.md`](AGENTS.md): the rules agents follow, plus a troubleshooting
+  table.
+
+Project layout:
+
+- `deployments/` holds the AWS and Azure Terraform roots.
+- `modules/` holds the components, with `modules/shared` for those both clouds
+  use.
+- `environments/examples/` holds the templates.
+- `lib/` holds the `./infra` CLI (Python standard library only).
+- `tests/` holds the CLI and documentation checks that `./infra validate` runs.
