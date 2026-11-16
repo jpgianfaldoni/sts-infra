@@ -353,11 +353,14 @@ variable "connectivity" {
     mysql_flexible_server = optional(object({
       serverless = optional(string, "none")
     }), {})
+    sql_server_vm = optional(object({
+      serverless = optional(string, "none")
+    }), {})
   })
   default = {}
 
   validation {
-    condition = alltrue([for mode in [var.connectivity.sql_database.serverless, var.connectivity.mysql_flexible_server.serverless] :
+    condition = alltrue([for mode in [var.connectivity.sql_database.serverless, var.connectivity.mysql_flexible_server.serverless, var.connectivity.sql_server_vm.serverless] :
     contains(["none", "private_link"], mode)])
     error_message = "Serverless connectivity modes must be none or private_link."
   }
@@ -377,6 +380,22 @@ variable "connectivity" {
     )
     error_message = "connectivity.sql_database.serverless = \"private_link\" requires features.workspace, features.sql_database, and databricks_account_id."
   }
+
+  validation {
+    condition = (
+      var.connectivity.sql_server_vm.serverless == "none" ||
+      (var.features.workspace && var.features.sql_server_vm && var.databricks_account_id != null && var.sql_server_vm.private_dns_name != null)
+    )
+    error_message = "SQL Server VM serverless Private Link requires features.workspace, features.sql_server_vm, databricks_account_id, and sql_server_vm.private_dns_name."
+  }
+
+  validation {
+    condition = (
+      var.connectivity.sql_server_vm.serverless != "private_link" ||
+      !can(regex("\\.(internal|localhost|test)$", var.sql_server_vm.private_dns_name))
+    )
+    error_message = "Serverless Private Link does not support private-use TLDs such as .internal, .localhost, or .test; use a hostname such as sqlserver.lab.exampledomain.com."
+  }
 }
 variable "existing_network_connectivity_config_id" {
   description = "Optional existing Databricks NCC ID to reuse for serverless private endpoint rules."
@@ -392,11 +411,17 @@ variable "existing_network_connectivity_config_id" {
 variable "sql_server_vm" {
   description = "SQL Server VM options. lakeflow_connect_enabled prepares the demo database for Lakeflow Connect CDC from inside the VM, without any network path to it."
   type = object({
-    lakeflow_connect_enabled = optional(bool, true)
-    lakeflow_username        = optional(string, "lakeflow")
-    private_dns_name         = optional(string)
+    lakeflow_connect_enabled  = optional(bool, true)
+    lakeflow_username         = optional(string, "lakeflow")
+    private_dns_name          = optional(string)
+    workspace_peering_enabled = optional(bool, false)
   })
   default = {}
+
+  validation {
+    condition     = !var.sql_server_vm.workspace_peering_enabled || (var.features.workspace && var.features.sql_server_vm)
+    error_message = "SQL Server VM peering requires features.workspace and features.sql_server_vm."
+  }
 }
 variable "sql_vm_network" {
   type = object({ vnet_address_space = list(string)
@@ -416,6 +441,12 @@ variable "tags" {
     Environment = "demo"
   }
 }
+variable "recovery_secret_imports" {
+  description = "Set only by ./infra recover-plan: existing Key Vault secret IDs to adopt through a saved plan."
+  type        = map(string)
+  default     = {}
+}
+
 variable "allow_destructive_demo_cleanup" {
   description = "Disposable labs only: let destroy delete resource groups that still contain resources Terraform does not manage, such as ones injected by Azure Policy."
   type        = bool

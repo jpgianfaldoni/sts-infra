@@ -1015,6 +1015,92 @@ run "sql_server_vm_private_hostname" {
   }
 }
 
+run "sql_server_vm_both_private_paths_with_cdc" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      workspace_peering_enabled = true
+      private_dns_name          = "sqlserver.lab.exampledomain.com"
+      lakeflow_connect_enabled  = true
+    }
+    connectivity = {
+      sql_server_vm = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      length(module.sql_server_vm_workspace_peering) == 1 &&
+      length(module.sql_server_vm_private_link_service) == 1 &&
+      local.serverless_private_endpoint_rules.sql_server_vm.group_id == null &&
+      local.serverless_private_endpoint_rules.sql_server_vm.domain_names == ["sqlserver.lab.exampledomain.com"]
+    )
+    error_message = "VM networking must use peering for classic and a custom Private Link Service with the application hostname for serverless."
+  }
+
+  assert {
+    condition = (
+      keys(output.lab_check.checks) == ["sql_server_vm_classic", "sql_server_vm_serverless"] &&
+      output.lab_check.checks.sql_server_vm_classic.cdc == "sqlserver_cdc" &&
+      output.lab_check.checks.sql_server_vm_serverless.run_after == "sql_server_vm_classic" &&
+      contains(output.key_vault.secret_names, local.lab_checks.sql_server_vm_serverless.cdc_password_key)
+    )
+    error_message = "Both VM paths must be checked, including sample data and the CDC login stored in Key Vault; checks must not race source setup."
+  }
+}
+
+run "reject_sql_server_vm_private_link_without_hostname" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    connectivity = {
+      sql_server_vm = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  expect_failures = [var.connectivity]
+}
+
+run "reject_sql_server_vm_private_link_private_use_tld" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      private_dns_name = "sqlserver.lab.internal"
+    }
+    connectivity = {
+      sql_server_vm = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  expect_failures = [var.connectivity]
+}
+
 run "lab_check_enables_change_tracking_on_azure_sql" {
   command = plan
 

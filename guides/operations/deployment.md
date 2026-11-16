@@ -43,6 +43,52 @@ number of resource instances and any tainted addresses found in state, and
 prints the exact command needed to plan reconciliation. Never retry the stale
 plan: cloud resources may have changed before the failure.
 
+## Recover after Azure cleanup
+
+Local state can outlive resources deleted by automated cleanup. Keep that state
+and the environment file, then use:
+
+```bash
+./infra recover-plan azure environments/local/my-azure.tfvars
+# Review every forget:, import:, replace:, and delete: line.
+./infra apply azure environments/local/my-azure.tfvars
+# Repeat recover-plan and review/apply each stage until the plan has no changes.
+./infra verify azure environments/local/my-azure.tfvars
+```
+
+`recover-plan` checks only Azure workspace/vault IDs and NCC rules already
+identified by this deployment's state. API and permission errors stop recovery;
+they never count as evidence that something was deleted. Recovery has these
+stages, skipping stages that are unnecessary:
+
+1. **Repair state.** Save a recovery plan listing `forget:` actions for missing
+   or explicitly deactivated NCC rules and workspace-provider resources whose
+   parent workspace Azure confirms was deleted. A deactivated rule can still
+   report `ESTABLISHED` while awaiting purge. Applying this stage only removes
+   these entries from local state; it makes no cloud changes. Apply validates
+   the same environment, source, identity, and plan digests as a Terraform
+   saved plan, also checks the state digest, and rechecks the live evidence.
+   The original state is backed up privately beside the recovery plan.
+2. **Restore parents.** Save a targeted Terraform plan to recreate a deleted
+   workspace or Key Vault and its dependencies. AzureRM recovers soft-deleted
+   vaults through Terraform. Workspace objects and secrets wait until their
+   parents exist again. Targeting is limited to this recovery stage; it is not
+   a complete deployment plan.
+3. **Adopt and reconcile.** Read secret names and version IDs (never secret
+   values) from the restored vault. Secrets missing from state are imported
+   through Terraform import blocks in the saved plan. Terraform refresh
+   discovers other deleted resources and plans their recreation, including
+   missing database VMs and endpoint rules. Imports appear as `import:` in
+   the saved summary. Apply uses the ordinary saved-plan checks and automatic
+   endpoint approval.
+
+Recovery is Azure-only and requires the original local state. It never purges
+a vault or deletes cloud resources to force recreation. A failed/interrupted
+state repair cannot be reused: run `recover-plan` again. An old workspace
+profile may require `./infra setup azure <tfvars> --yes --no-workspace-profile`
+before restoring workspace objects; explicit operator profile overrides remain
+in effect. `status` recognizes a pending recovery state plan as the next apply.
+
 ## Seed a locked-down Azure external volume
 
 An operator cannot upload through an ADLS public endpoint after public network
@@ -122,12 +168,15 @@ When a source has at least one classic or serverless path and
 `lab_check.enabled` is not `false`, Terraform creates a `<prefix>-lab-check`
 job and a notebook under `/Shared/sts-infra/<prefix>/`. `verify`:
 
-1. copies each AWS database's RDS-managed Secrets Manager credentials into the
+1. waits up to 15 minutes (`--endpoint-wait <seconds>`) for every expected
+   serverless private endpoint rule to exist, be active, and become
+   `ESTABLISHED`. Missing, unreadable, rejected, or deactivated rules cannot
+   count as ready. A zero-second budget still checks once. A readiness failure
+   saves a failed verification result and exits `13` before starting the job;
+2. copies each AWS database's RDS-managed Secrets Manager credentials into the
    `<prefix>-lab-check` secret scope (through pipes only: never printed, never
    on a command line, never in Terraform state); Azure SQL uses the Key
    Vault-backed scope;
-2. waits up to 15 minutes (`--endpoint-wait <seconds>`) for the serverless
-   private endpoint rules to become `ESTABLISHED`;
 3. runs the job: one task per path, classic tasks on a single-node job cluster
    and serverless tasks on serverless jobs compute. Each task resolves the
    host, opens a TCP connection, and for PostgreSQL, RDS SQL Server, and Azure
@@ -137,7 +186,16 @@ job and a notebook under `/Shared/sts-infra/<prefix>/`. `verify`:
 4. prints one line per path and saves the result in
    `.artifacts/<cloud>/<deployment-id>/verify.json`.
 
-`verify` exits `13` when a check fails and reports the failing stage (`dns`,
+The notebook probes DNS and TCP before reading credentials or modifying data.
+Serverless probes retry for up to 10 minutes to allow private DNS/endpoint
+propagation (the `network_wait_seconds` notebook widget can set 0–900 seconds).
+Every returned address must be private, including IPv4-mapped IPv6 addresses;
+a public DNS fallback never receives a connection from the probe. Classic
+checks fail immediately by default. These data-plane checks determine whether
+traffic actually flows; an active `ESTABLISHED` account rule is only a
+prerequisite. `--endpoint-wait` controls the account-rule wait separately.
+
+`verify` exits `13` when a check fails and reports the failing stage (`endpoint`, `dns`,
 `tcp`, `driver`, `credentials`, `login`, `seed`, or `query`) with a hint. An
 error no check anticipated is reported at the step it interrupted (or at
 `driver` when it is raised inside the driver), with the installed driver

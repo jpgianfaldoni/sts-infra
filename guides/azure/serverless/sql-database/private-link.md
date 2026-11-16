@@ -56,9 +56,38 @@ database. Create the Unity Catalog connection as described in
 credentials are in the Key Vault and the Key Vault-backed secret scope
 described in the [deployment notes](overview.md).
 
-The rest of this guide explains the components and the equivalent manual
-steps. Use it to understand the design, to configure SQL Server on a VM (which
-Terraform does not automate), or to troubleshoot.
+## Automated path for SQL Server on a VM
+
+Start from `environments/examples/azure/workspace-sql-server-vm-private-link.tfvars`
+to create a VNet-injected workspace and SQL Server in a separate Azure VNet.
+This simulates an on-premises source; it creates no connection to a real
+external network.
+
+`sql_server_vm.workspace_peering_enabled = true` creates peering, allows SQL
+traffic from the classic compute subnets, and links the database's private
+DNS zone to the workspace. `connectivity.sql_server_vm.serverless = "private_link"`
+creates an internal Standard Load Balancer, a Private Link Service, and an
+NCC rule using `sql_server_vm.private_dns_name` as its application hostname.
+The custom service rule uses `domain_names`, with no `group_id`.
+Use a hostname such as `sqlserver.lab.exampledomain.com`: serverless Private Link
+does not support private-use TLDs such as `.internal`, `.localhost`, or `.test`.
+
+The service has no public frontend and no automatically approved subscriptions.
+By default, `./infra apply` approves only the Databricks endpoint returned by
+this deployment's NCC. `endpoint_approval = "manual"` leaves it pending for
+the manual exercise below.
+
+During apply, Azure VM Run Command starts SQL Server Agent, loads `demo` with
+three customers and five orders, installs the Lakeflow utility objects,
+creates the `lakeflow` ingestion login, and enables and tests CDC capture.
+Passwords are stored in Key Vault. `./infra verify` checks DNS, TCP,
+authenticated queries, sample row counts, and the ingestion login over each
+configured path. This prepares the source; it creates no ingestion pipeline.
+
+The rest of this guide explains the components and equivalent manual steps
+for understanding the design and troubleshooting. The disconnected
+`workspace-sql-server-vm-lakeflow-cdc` template remains available to build
+the network paths yourself.
 
 ## Manual UI guide
 

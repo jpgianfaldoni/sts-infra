@@ -37,6 +37,7 @@ offer the closest scenario.
 | Azure MySQL VM ready for Lakeflow Connect, no path | `azure/workspace-mysql-vm-lakeflow-cdc` |
 | Azure Oracle VM ready for Lakeflow Connect, no path | `azure/workspace-oracle-vm-lakeflow-cdc` |
 | Azure SQL Server VM ready for Lakeflow Connect, no path | `azure/workspace-sql-server-vm-lakeflow-cdc` |
+| Azure SQL Server VM ready for CDC, reached from classic and serverless | `azure/workspace-sql-server-vm-private-link` |
 
 If no target exists for the account, ask for the non-secret identifiers
 (account IDs, region, and for AWS SSO the start URL, SSO region, and role
@@ -95,6 +96,10 @@ Before each apply, show the user the `Saved plan summary` line, every
 - `verify` loads the sample data and checks each path. On exit 13, read each
   failed check's `stage` and `hint`, fix or wait (serverless endpoints can
   take about 10 minutes to become `ESTABLISHED`), and rerun.
+- A rule must also be present and active: a deactivated rule can retain
+  `ESTABLISHED` until purge. Verification fails at `endpoint` before launching
+  the job when rules are missing/inactive/unreadable. The job separately waits
+  for private DNS and TCP before reading credentials or loading sample data.
 
 Report the result to the user in plain language: the workspace URL
 (`./infra output <cloud> <tfvars> --json`), which compute reaches which source

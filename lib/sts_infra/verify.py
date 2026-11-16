@@ -6,7 +6,7 @@ import os
 import re
 import time
 
-from . import auth, clis
+from . import auth, clis, endpoints
 from .common import is_seconds, EXIT_USAGE, EXIT_VERIFY_FAILED, die, env_int, err, out, parse_json, utc_now
 from .context import Context, jq_tostring
 
@@ -61,39 +61,36 @@ def sync_lab_check_credentials(ctx: Context, workspace_url: str, lab: dict) -> N
         err(f"Copied the {source} credentials into secret scope {scope}.")
 
 
-def wait_for_serverless_rules(ctx: Context, outputs: dict, lab: dict, wait_seconds: int) -> None:
-    """Serverless checks fail until Databricks reports the private endpoint rules ESTABLISHED."""
+def wait_for_serverless_rules(ctx: Context, outputs: dict, lab: dict, wait_seconds: int) -> list:
+    """Return readiness problems; never accept missing or deactivated rules."""
     if not any((check or {}).get("compute") == "serverless" for check in (lab.get("checks") or {}).values()):
-        return
+        return []
     connectivity = (outputs.get("serverless_connectivity") or {}).get("value") or {}
     ncc = connectivity.get("network_connectivity_config_id") or ""
-    rule_ids = [rule.get("rule_id") for rule in (connectivity.get("rules") or {}).values() if isinstance(rule, dict) and rule.get("rule_id") is not None]
-    if not ncc or not rule_ids or wait_seconds <= 0:
-        return
-    from .common import items_of
+    rules = dict(connectivity.get("rules") or {})
+    for check in (lab.get("checks") or {}).values():
+        if (check or {}).get("compute") == "serverless":
+            rules.setdefault(check.get("source"), {})
+    if not ncc:
+        return [{"source": source, "rule_id": None, "state": "NO_NCC"} for source in rules]
 
-    deadline = time.time() + wait_seconds
+    deadline = time.monotonic() + wait_seconds
     while True:
         code, payload = clis.databricks_account_cli(ctx, "account", "network-connectivity", "list-private-endpoint-rules", ncc, "--output", "json", stderr="null")
         listed = parse_json(payload) if code == 0 else None
-        if listed is None:
-            err("WARNING: could not read the NCC private endpoint rules; running the checks anyway.")
-            return
-        pending = [
-            f"{text(alternative(rule.get('resource_id'), rule.get('endpoint_service'), rule.get('rule_id')))}={text(alternative(rule.get('connection_state'), 'UNKNOWN'))}"
-            for rule in items_of(listed, "items", "rules")
-            if isinstance(rule, dict) and rule.get("rule_id") in rule_ids and alternative(rule.get("connection_state"), "UNKNOWN") != "ESTABLISHED"
+        pending = endpoints.rule_problems(rules, listed) if endpoints.valid_rule_list(listed) else [
+            {"source": source, "rule_id": (rule or {}).get("rule_id"), "state": "API_UNREADABLE"}
+            for source, rule in rules.items()
         ]
         if not pending:
-            err("Serverless private endpoint rules are ESTABLISHED.")
-            return
-        if time.time() >= deadline:
-            err("WARNING: serverless private endpoint rules are not ESTABLISHED yet; serverless checks may fail:")
-            for item in pending:
-                err(f"  {item}")
-            return
-        err("Waiting for serverless private endpoint rules to become ESTABLISHED: " + "".join(f"{item} " for item in pending))
-        time.sleep(env_int("STS_INFRA_VERIFY_INTERVAL", 30))
+            err("Every expected serverless private endpoint rule is active and ESTABLISHED; the job will check private DNS and TCP.")
+            return []
+        detail = ", ".join(f"{p['source']} ({p['rule_id'] or 'no rule ID'})={p['state']}" for p in pending)
+        if any(p["state"] in ("DEACTIVATED", "REJECTED", "DELETED") for p in pending) or time.monotonic() >= deadline:
+            err("Serverless endpoint readiness failed: " + detail)
+            return pending
+        err("Waiting for active serverless private endpoint rules: " + detail)
+        time.sleep(min(env_int("STS_INFRA_VERIFY_INTERVAL", 30), max(0, deadline - time.monotonic())))
 
 
 def latest_attempts(run: dict) -> list:
@@ -188,8 +185,32 @@ def verify_deployment(ctx: Context, cloud: str, vars_path: str, json_mode: bool,
     workspace_url = ctx.state_workspace_url()
     job_id = jq_tostring(lab.get("job_id")) or "null"
 
+    problems = wait_for_serverless_rules(ctx, outputs, lab, endpoint_wait)
+    if problems:
+        detail = "; ".join(f"{p['source']}={p['state']}" for p in problems)
+        summary = {
+            "version": 1, "cloud": ctx.cloud, "deployment_id": ctx.id, "status": "failed", "checked_at": utc_now(),
+            "run_id": None, "run_url": None, "job_url": lab.get("job_url"), "endpoint_problems": problems,
+            "checks": [{
+                **check, "check": key, "status": "failed" if check.get("compute") == "serverless" else "skipped",
+                "stage": "endpoint", "error": detail,
+                "hint": f"Run ./infra endpoints {ctx.cloud} status {ctx.display_vars}; "
+                        + (f"use ./infra recover-plan azure {ctx.display_vars} for cleanup damage."
+                           if ctx.cloud == "azure" else "reconcile missing or inactive rules with a saved plan."),
+            } for key, check in (lab.get("checks") or {}).items()],
+        }
+        from .common import write_private
+
+        rendered = json.dumps(summary, indent=2, ensure_ascii=False)
+        write_private(f"{ctx.artifacts}/verify.json", rendered + "\n")
+        if json_mode:
+            out(rendered)
+        else:
+            for check in summary["checks"]:
+                out(render_check(check))
+        return EXIT_VERIFY_FAILED
+
     sync_lab_check_credentials(ctx, workspace_url, lab)
-    wait_for_serverless_rules(ctx, outputs, lab, endpoint_wait)
 
     code, payload = clis.databricks_workspace_cli(ctx, workspace_url, "jobs", "run-now", job_id, "--no-wait", "--output", "json")
     started = parse_json(payload, {}) if code == 0 else {}

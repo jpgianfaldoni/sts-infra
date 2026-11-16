@@ -38,5 +38,16 @@ resource "databricks_mws_ncc_binding" "this" {
 
   network_connectivity_config_id = var.network_connectivity_config_id
   workspace_id                   = var.workspace_id
-  depends_on                     = [databricks_mws_ncc_private_endpoint_rule.sql_database, databricks_mws_ncc_private_endpoint_rule.mysql_flexible_server]
+  depends_on                     = [databricks_mws_ncc_private_endpoint_rule.sql_database, databricks_mws_ncc_private_endpoint_rule.mysql_flexible_server, databricks_mws_ncc_private_endpoint_rule.sql_server_vm]
+}
+
+resource "databricks_mws_ncc_private_endpoint_rule" "sql_server_vm" {
+  count    = contains(keys(var.private_endpoint_rules), "sql_server_vm") ? 1 : 0
+  provider = databricks.account
+
+  network_connectivity_config_id = var.network_connectivity_config_id
+  resource_id                    = var.private_endpoint_rules["sql_server_vm"].resource_id
+  domain_names                   = var.private_endpoint_rules["sql_server_vm"].domain_names
+
+  depends_on = [databricks_mws_ncc_private_endpoint_rule.mysql_flexible_server]
 }

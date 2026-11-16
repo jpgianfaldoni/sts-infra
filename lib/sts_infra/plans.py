@@ -130,6 +130,7 @@ def show_plan_summary(ctx: Context, plan: str, stage: str = "complete") -> None:
         return [c.get("address") for c in changes if test((c.get("change") or {}).get("actions") or [])]
 
     is_replace = lambda actions: "create" in actions and "delete" in actions  # noqa: E731
+    imports = [c["address"] for c in data.get("resource_changes") or [] if (c.get("change") or {}).get("importing")]
     outputs = ((data.get("planned_values") or {}).get("outputs") or {})
     storage = (outputs.get("external_volume_storage") or {}).get("value") or {}
     summary = {
@@ -142,11 +143,13 @@ def show_plan_summary(ctx: Context, plan: str, stage: str = "complete") -> None:
             "update": len(addresses(lambda a: a == ["update"])),
             "replace": len(addresses(is_replace)),
             "delete": len(addresses(lambda a: a == ["delete"])),
+            "import": len(imports),
         },
         "create": addresses(lambda a: a == ["create"]),
         "update": addresses(lambda a: a == ["update"]),
         "replace": addresses(is_replace),
         "delete": addresses(lambda a: a == ["delete"]),
+        "import": imports,
         "warnings": ["metadata_only_external_storage"] if isinstance(storage, dict) and storage.get("connectivity_status") == "metadata_only" else [],
     }
     summary_file = f"{plan}.summary.json"
@@ -154,11 +157,13 @@ def show_plan_summary(ctx: Context, plan: str, stage: str = "complete") -> None:
         json.dump(summary, handle, indent=2)
         handle.write("\n")
     counts = summary["counts"]
-    out(f"Saved plan summary: create={counts['create']} update={counts['update']} replace={counts['replace']} delete={counts['delete']}")
+    out(f"Saved plan summary: create={counts['create']} update={counts['update']} replace={counts['replace']} delete={counts['delete']} import={counts['import']}")
     for address in summary["replace"]:
         out(f"  replace: {address}")
     for address in summary["delete"]:
         out(f"  delete: {address}")
+    for address in summary["import"]:
+        out(f"  import: {address}")
     if "metadata_only_external_storage" in summary["warnings"]:
         err("WARNING: this plan leaves external storage in metadata-only mode.")
         err("Unity Catalog objects can be browsed, but Databricks compute cannot read the files until public or private storage connectivity is configured.")
@@ -226,6 +231,15 @@ def terraform_init(ctx: Context) -> None:
 
 def create_plan(ctx: Context, cloud: str, vars_path: str, action: str) -> None:
     start_operation(ctx, cloud, vars_path, action)
+    if action == "apply":
+        from . import recovery
+
+        recovery.clear_repairs(ctx)
+    save_prepared_plan(ctx, action)
+
+
+def save_prepared_plan(ctx: Context, action: str, *, targets=(), recovery: bool = False) -> None:
+    """Save a Terraform plan after the caller binds, locks, and authenticates."""
     plan, metadata = plan_paths(ctx, action)
     terraform_init(ctx)
     remove_files(plan, metadata, f"{plan}.applied", f"{plan}.failed", f"{metadata}.failed", f"{plan}.summary.json")
@@ -234,6 +248,7 @@ def create_plan(ctx: Context, cloud: str, vars_path: str, action: str) -> None:
     # --replace forces a resource the cloud left broken (for example a rejected
     # private endpoint rule) to be recreated; it shows up as replace: below.
     args += [f"-replace={address}" for address in ctx.plan_replace]
+    args += [f"-target={address}" for address in targets]
     if ctx.terraform_logged("plan" if action == "apply" else "destroy-plan", *args) != 0:
         remove_files(plan)
         die("terraform plan failed; no saved plan was kept")
@@ -242,14 +257,21 @@ def create_plan(ctx: Context, cloud: str, vars_path: str, action: str) -> None:
         ctx.plan_stage = "complete"
     with open(metadata, "a") as handle:
         handle.write(f"stage={ctx.plan_stage}\n")
+        if recovery:
+            handle.write("recovery=true\n")
     show_plan_summary(ctx, plan, ctx.plan_stage)
     out(f"Saved plan: {plan}")
 
 
 def apply_plan(ctx: Context, cloud: str, vars_path: str, action: str) -> int:
-    from . import endpoints
+    from . import endpoints, recovery
 
-    start_operation(ctx, cloud, vars_path, action)
+    ctx.prepare(cloud, vars_path)
+    if action == "apply" and recovery.pending(ctx):
+        return recovery.apply_repairs(ctx, cloud, vars_path)
+    plan, metadata = plan_paths(ctx, action)
+    recovery_plan = os.path.isfile(metadata) and metadata_value(metadata, "recovery") == "true"
+    start_operation(ctx, cloud, vars_path, "recover" if recovery_plan else action)
     plan, metadata = plan_paths(ctx, action)
     if not os.path.isfile(plan):
         die(f"no saved {action} plan for deployment '{ctx.id}'; create one first")
@@ -272,6 +294,14 @@ def apply_plan(ctx: Context, cloud: str, vars_path: str, action: str) -> int:
     if action == "destroy":
         forget_workspace_profile(ctx)
     if action == "apply":
+        if recovery_plan:
+            out(f"Recovery stage applied. Next: ./infra recover-plan {cloud} {ctx.display_vars}; "
+                "when it reports no changes, run ./infra verify.")
+            # Approval still belongs to this reviewed deployment and is
+            # scoped to exactly the endpoint connections in its state.
+            if not endpoints.approve_after_apply(ctx):
+                err(f"WARNING: automatic endpoint approval did not finish; see ./infra endpoints {cloud} status {ctx.display_vars}")
+            return 0
         if not endpoints.approve_after_apply(ctx):
             err(f"WARNING: automatic endpoint approval did not finish; review with ./infra endpoints {ctx.cloud} status {ctx.display_vars}")
         print_next_steps_after_apply(ctx)

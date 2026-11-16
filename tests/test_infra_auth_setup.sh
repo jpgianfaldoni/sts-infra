@@ -179,7 +179,11 @@ case "${1:-} ${2:-}" in
     echo '[]'
     ;;
   "account network-connectivity")
-    echo '{"items":[{"rule_id":"rule-1","vpc_endpoint_id":"vpce-live","connection_state":"ESTABLISHED"}]}'
+    if [[ -n "${TEST_NCC_RULES:-}" ]]; then
+      echo "$TEST_NCC_RULES"
+    else
+      echo '{"items":[{"rule_id":"rule-1","vpc_endpoint_id":"vpce-live","connection_state":"ESTABLISHED"}]}'
+    fi
     ;;
   *)
     echo "unexpected databricks invocation: $*" >&2
@@ -193,6 +197,22 @@ cat > "$TEST_DIR/bin/az" <<'EOF'
 set -euo pipefail
 printf 'az %s\n' "$*" >> "$TEST_CALL_LOG"
 case "${1:-} ${2:-}" in
+  "resource show")
+    if [[ -n "${TEST_AZ_RESOURCE_MISSING:-}" ]]; then
+      echo 'ERROR: (ResourceNotFound) The resource was deleted' >&2
+      exit 3
+    fi
+    for ((i = 1; i <= $#; i++)); do
+      [[ "${!i}" != "--ids" ]] || { j=$((i + 1)); printf '"%s"\n' "${!j}"; }
+    done
+    ;;
+  "keyvault secret")
+    case "$3" in
+      list) echo "${TEST_RECOVERY_SECRETS:-[]}" ;;
+      list-versions) echo '"https://lab.vault.azure.net/secrets/db-password/version1"' ;;
+      *) echo 'recovery must not read secret values' >&2; exit 1 ;;
+    esac
+    ;;
   "account show")
     [[ -f "$TEST_STATE_DIR/azure-login" ]] || exit 1
     printf '{"id":"00000000-0000-0000-0000-000000000000","tenantId":"%s","user":{"name":"tester@example.com","type":"user"}}\n' \
@@ -251,6 +271,20 @@ case "${1:-}" in
   apply) [[ -z "${TEST_TF_APPLY_FAIL:-}" ]] || exit 1 ;;
   state)
     [[ "${2:-}" != list ]] || printf '%s' "${TEST_STATE_LIST:-}"
+    if [[ "${2:-}" == rm && -n "${TEST_RECOVERY_STATE:-}" ]]; then
+      python3 - "$TEST_RECOVERY_STATE" "$4" <<'PY'
+import json, sys
+from pathlib import Path
+path, wanted = Path(sys.argv[1]), sys.argv[2]
+state = json.loads(path.read_text())
+for resource in state.get("resources", []):
+    base = ((resource.get("module") or "") + ".").lstrip(".") + resource["type"] + "." + resource["name"]
+    resource["instances"] = [i for i in resource["instances"]
+                             if base + ("[" + json.dumps(i["index_key"]) + "]" if "index_key" in i else "") != wanted]
+state["serial"] = state.get("serial", 0) + 1
+path.write_text(json.dumps(state))
+PY
+    fi
     ;;
   plan)
     for arg in "$@"; do
@@ -1164,5 +1198,75 @@ jq -e '.deployments["aws/aws-second"].databricks_workspace_profile == "sts-aws-s
 run "$INFRA" setup aws "$SECOND_VARS" --yes --workspace-profile old-ws
 expect_code 11 "setup with an explicit profile for another workspace"
 pass "setup replaces a saved profile for a destroyed workspace without overwriting it"
+
+# --- Endpoint readiness fails before jobs or credential synchronization ------
+SERVERLESS_LAB_OUTPUT="$(jq -c '.lab_check.value.checks.rds_postgres_classic.compute = "serverless" |
+  .serverless_connectivity.value = {network_connectivity_config_id: "ncc-1", rules: {rds_postgres: {rule_id: "rule-1"}}}' <<< "$LAB_OUTPUT")"
+for rule_list in '[]' '{"items":[{"rule_id":"rule-1","connection_state":"ESTABLISHED","deactivated":true}]}'; do
+  reset_log
+  run TEST_OUTPUT_JSON="$SERVERLESS_LAB_OUTPUT" TEST_NCC_RULES="$rule_list" "$INFRA" verify aws "$AWS_VARS" --endpoint-wait 0 --json
+  expect_code 13 "verify with missing or deactivated serverless rule"
+  expect_json '.status == "failed" and .run_id == null and .checks[0].stage == "endpoint"' "endpoint readiness failure not reported"
+  expect_no_log '^databricks jobs run-now'
+  expect_no_log '^aws secretsmanager get-secret-value'
+  jq -e '.status == "failed" and .checks[0].stage == "endpoint"' "$ROOT/.artifacts/aws/aws-lab/verify.json" >/dev/null || fail "stale passed verification retained"
+done
+pass "missing/deactivated endpoints invalidate verification before credentials or jobs"
+
+# --- Reviewed cleanup repairs and parent restoration through the CLI --------
+RECOVERY_STATE="$ROOT/.state/azure/azure-lab/terraform.tfstate"
+cat > "$RECOVERY_STATE" <<'EOF'
+{"version":4,"serial":1,"outputs":{},"resources":[
+ {"mode":"managed","type":"azurerm_databricks_workspace","name":"this","module":"module.workspace[0]","instances":[{"attributes":{"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/lab/providers/Microsoft.Databricks/workspaces/lab"}}]},
+ {"mode":"managed","type":"databricks_job","name":"this","module":"module.lab_check[0]","provider":"provider[\"registry.terraform.io/databricks/databricks\"].workspace","instances":[{"attributes":{"id":"55"}}]},
+ {"mode":"managed","type":"databricks_mws_ncc_private_endpoint_rule","name":"sql_server_vm","module":"module.ncc[0]","instances":[{"index_key":0,"attributes":{"network_connectivity_config_id":"ncc-1","rule_id":"rule-1"}}]}
+]}
+EOF
+TOMBSTONE='{"items":[{"rule_id":"rule-1","connection_state":"ESTABLISHED","deactivated":true}]}'
+reset_log
+run TEST_AZ_RESOURCE_MISSING=1 TEST_NCC_RULES="$TOMBSTONE" "$INFRA" recover-plan azure "$AZURE_VARS"
+expect_code 0 "Azure recovery state plan"
+expect_text 'forget: module.lab_check[0].databricks_job.this' "deleted workspace child not listed"
+expect_text 'forget: module.ncc[0].databricks_mws_ncc_private_endpoint_rule.sql_server_vm[0]' "tombstone not listed"
+expect_no_log '^terraform .* state rm'
+expect_no_log '^terraform .* apply '
+run "$INFRA" status azure "$AZURE_VARS" --json
+expect_code 0 "status with pending recovery"
+expect_json '.next_action.command | contains("./infra apply azure")' "status did not resume recovery"
+reset_log
+run TEST_AZ_RESOURCE_MISSING=1 "$INFRA" apply azure "$AZURE_VARS"
+expect_code 1 "recovery apply after rule reactivation"
+expect_text 'live recovery evidence changed' "changed live evidence not refused"
+expect_no_log '^terraform .* state rm'
+run TEST_AZ_RESOURCE_MISSING=1 TEST_NCC_RULES="$TOMBSTONE" TEST_RECOVERY_STATE="$RECOVERY_STATE" "$INFRA" apply azure "$AZURE_VARS"
+expect_code 0 "reviewed Azure state repair"
+expect_log '^terraform .* state rm -- module.lab_check\[0\].databricks_job.this$'
+expect_no_log '^terraform .* apply '
+reset_log
+run TEST_AZ_RESOURCE_MISSING=1 "$INFRA" recover-plan azure "$AZURE_VARS"
+expect_code 0 "targeted parent restoration plan"
+expect_log '^terraform .* plan .* -target=module.workspace\[0\].azurerm_databricks_workspace.this$'
+run TEST_AZ_RESOURCE_MISSING=1 "$INFRA" apply azure "$AZURE_VARS"
+expect_code 0 "targeted parent restoration apply"
+expect_log '^terraform .* apply .*apply.tfplan$'
+pass "Azure recovery rechecks reviewed state repairs and saves parent restoration plans"
+
+# Recovered secrets use Terraform's saved import plan, not CLI value reads.
+cat > "$RECOVERY_STATE" <<'EOF'
+{"version":4,"serial":4,"outputs":{"key_vault":{"value":{"name":"lab","id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/lab/providers/Microsoft.KeyVault/vaults/lab","uri":"https://lab.vault.azure.net/","secret_names":["db-password"]}}},"resources":[
+ {"mode":"managed","type":"azurerm_key_vault","name":"this","module":"module.key_vault[0]","instances":[{"attributes":{"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/lab/providers/Microsoft.KeyVault/vaults/lab"}}]}
+]}
+EOF
+echo '{"resource_changes":[{"address":"module.key_vault[0].azurerm_key_vault_secret.this[\"db-password\"]","change":{"actions":["no-op"],"importing":{"id":"https://lab.vault.azure.net/secrets/db-password/version1"}}}]}' > "$TEST_DIR/import-plan.json"
+reset_log
+run TEST_RECOVERY_SECRETS='[{"name":"db-password","id":"https://lab.vault.azure.net/secrets/db-password"}]' TEST_PLAN_JSON="$TEST_DIR/import-plan.json" "$INFRA" recover-plan azure "$AZURE_VARS"
+expect_code 0 "recovered secret import plan"
+expect_text 'import: module.key_vault[0].azurerm_key_vault_secret.this["db-password"]' "no-op import not shown in summary"
+expect_log 'plan .*-var=recovery_secret_imports=.*https://lab.vault.azure.net/secrets/db-password/version1'
+expect_no_log '^az keyvault secret show'
+expect_no_log '^terraform .* import '
+run "$INFRA" apply azure "$AZURE_VARS"
+expect_code 0 "recovered secret saved plan apply"
+pass "Azure recovery imports existing secret versions using metadata and saved Terraform plans"
 
 echo "infra CLI tests passed"

@@ -170,7 +170,49 @@ module "sql_server_vm" {
   lakeflow_connect_enabled             = var.sql_server_vm.lakeflow_connect_enabled
   lakeflow_username                    = var.sql_server_vm.lakeflow_username
   private_dns_name                     = var.sql_server_vm.private_dns_name
+  allowed_sql_source_cidrs             = var.features.workspace && var.sql_server_vm.workspace_peering_enabled ? [var.workspace_network.host_subnet_cidr, var.workspace_network.container_subnet_cidr] : []
   tags                                 = var.tags
+}
+
+module "sql_server_vm_workspace_peering" {
+  count  = var.features.workspace && var.features.sql_server_vm && var.sql_server_vm.workspace_peering_enabled ? 1 : 0
+  source = "../../modules/azure/vnet-peering"
+
+  name = "${local.name_prefix}-sqlvm"
+  local_vnet = {
+    id                  = module.workspace_network[0].vnet_id
+    name                = module.workspace_network[0].vnet_name
+    resource_group_name = module.workspace_network[0].resource_group_name
+  }
+  remote_vnet = {
+    id                  = module.sql_server_vm[0].vnet_id
+    name                = module.sql_server_vm[0].vnet_name
+    resource_group_name = module.sql_server_vm[0].resource_group_name
+  }
+  private_dns_zone_links = var.sql_server_vm.private_dns_name == null ? {} : {
+    sqlvm = {
+      private_dns_zone_name = module.sql_server_vm[0].private_dns_zone.name
+      resource_group_name   = module.sql_server_vm[0].resource_group_name
+      virtual_network_id    = module.workspace_network[0].vnet_id
+    }
+  }
+  tags = var.tags
+}
+
+module "sql_server_vm_private_link_service" {
+  count  = var.features.workspace && var.features.sql_server_vm && var.connectivity.sql_server_vm.serverless == "private_link" ? 1 : 0
+  source = "../../modules/azure/private-link-service"
+
+  name                 = "${local.name_prefix}-sqlvm"
+  location             = var.location
+  resource_group_name  = module.sql_server_vm[0].resource_group_name
+  frontend_subnet_id   = module.sql_server_vm[0].vm_subnet_id
+  nat_subnet_id        = module.sql_server_vm[0].private_link_service_subnet_id
+  network_interface_id = module.sql_server_vm[0].network_interface_id
+  port                 = module.sql_server_vm[0].port
+  tags                 = var.tags
+
+  depends_on = [module.sql_server_vm]
 }
 
 module "mysql_flexible_server" {
@@ -332,6 +374,13 @@ module "key_vault" {
 
 locals {
   serverless_private_endpoint_rules = merge(
+    var.features.workspace && var.features.sql_server_vm && var.connectivity.sql_server_vm.serverless == "private_link" ? {
+      sql_server_vm = {
+        resource_id  = module.sql_server_vm_private_link_service[0].id
+        group_id     = null
+        domain_names = [var.sql_server_vm.private_dns_name]
+      }
+    } : {},
     var.features.workspace && var.features.sql_database && var.connectivity.sql_database.serverless == "private_link" ? {
       sql_database = {
         resource_id = module.sql_database[0].server_id
@@ -351,6 +400,7 @@ locals {
 # not depend on anything that depends on the workspace.
 locals {
   serverless_private_link_enabled = var.features.workspace && anytrue([
+    var.features.sql_server_vm && var.connectivity.sql_server_vm.serverless == "private_link",
     var.features.sql_database && var.connectivity.sql_database.serverless == "private_link",
     var.features.mysql_flexible_server && var.connectivity.mysql_flexible_server.serverless == "private_link",
   ])
@@ -385,7 +435,7 @@ module "ncc" {
   workspace_id                   = tonumber(module.workspace[0].workspace_id)
   private_endpoint_rules         = local.serverless_private_endpoint_rules
 
-  depends_on = [module.sql_database, module.mysql_flexible_server]
+  depends_on = [module.sql_database, module.mysql_flexible_server, module.sql_server_vm_private_link_service]
 }
 
 moved {

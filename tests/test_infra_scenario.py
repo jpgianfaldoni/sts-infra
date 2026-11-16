@@ -63,6 +63,20 @@ def levels(report, level):
     return [item["message"] for item in report["findings"] if item["level"] == level]
 
 
+class AzureSqlVmScenario(unittest.TestCase):
+    def test_azure_sql_vm_explains_both_private_paths_and_cdc(self):
+        config = azure_config(
+            features={"sql_database": False, "sql_server_vm": True},
+            connectivity={"sql_database": {"serverless": "none"}, "sql_server_vm": {"serverless": "private_link"}},
+            sql_server_vm={"workspace_peering_enabled": True, "private_dns_name": "sqlserver.lab.exampledomain.com"},
+        )
+        report = scenario.analyze("azure", config, MANIFEST)
+        self.assertEqual(levels(report, "error"), [])
+        self.assertEqual({(p["compute"], p["mode"]) for p in report["paths"]}, {("classic", "peering"), ("serverless", "private_link")})
+        self.assertTrue(all(c["sample_data"] and c["lakeflow_setup"] == "CDC" for c in report["checks"]))
+        self.assertTrue({"ncc", "vnet_peering", "private_link_service", "lab_check"} <= {c["name"] for c in report["components"]})
+
+
 class TfvarsParsing(unittest.TestCase):
     def test_top_level_assignments_ignore_comments_and_nested_keys(self):
         with tempfile.TemporaryDirectory() as directory:

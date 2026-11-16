@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sys
 
-from . import auth, authconfig, endpoints, operations, plans, setup, verify, vm_setup
+from . import auth, authconfig, endpoints, operations, plans, recovery, setup, verify, vm_setup
 from .common import ADDRESS_PATTERN, EXIT_USAGE, ROOT, Exit, Usage, die, err, out
 from .context import Context, Interrupted, cloud_root, scenario
 
@@ -27,6 +27,7 @@ USAGE = """Usage:
   ./infra doctor <aws|azure> [<environment.tfvars>] [--json] [--wait <seconds>]
   ./infra validate <aws|azure>
   ./infra plan <aws|azure> <environment.tfvars> [--replace <resource address>]...
+  ./infra recover-plan azure <environment.tfvars>
   ./infra apply <aws|azure> <environment.tfvars>
   ./infra verify <aws|azure> <environment.tfvars> [--json] [--endpoint-wait <seconds>]
   ./infra seed-access-plan azure <environment.tfvars> [--operator-ip <ipv4>]
@@ -136,6 +137,10 @@ def dispatch(ctx: Context, argv: list) -> int:
         return subprocess.call([f"{ROOT}/scripts/validate.sh", args[0]])
     if command == "plan":
         plan_command(ctx, args)
+        return 0
+    if command == "recover-plan":
+        require(len(args) == 2 and args[0] == "azure")
+        recovery.recover_plan(ctx, args[1])
         return 0
     if command == "apply":
         require(len(args) == 2)

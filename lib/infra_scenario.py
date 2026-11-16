@@ -34,7 +34,7 @@ TARGET_TERRAFORM_FIELDS = {
     "azure": ("subscription_id", "tenant_id", "databricks_account_id", "location"),
 }
 # Sources whose lab check loads sample data; the others only connect.
-SEEDED_SOURCES = {"aws": {"rds_postgres", "rds_sql_server", "rds_mysql", "rds_oracle"}, "azure": {"sql_database", "mysql_flexible_server"}}
+SEEDED_SOURCES = {"aws": {"rds_postgres", "rds_sql_server", "rds_mysql", "rds_oracle"}, "azure": {"sql_database", "mysql_flexible_server", "sql_server_vm"}}
 # Sources the lab check job prepares for Lakeflow Connect: (option default,
 # change capture method). Defaults match deployments/<cloud>/variables.tf.
 LAKEFLOW_SOURCES = {
@@ -44,7 +44,7 @@ LAKEFLOW_SOURCES = {
         "rds_mysql": (True, "binary log replication"),
         "rds_oracle": (True, "LogMiner CDC"),
     },
-    "azure": {"sql_database": (True, "change tracking"), "mysql_flexible_server": (True, "binary log replication")},
+    "azure": {"sql_database": (True, "change tracking"), "mysql_flexible_server": (True, "binary log replication"), "sql_server_vm": (True, "CDC")},
 }
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -577,8 +577,10 @@ def derived_components(cloud, config, paths):
         key_vault = config.get("key_vault", {})
         if key_vault.get("enabled", True) and any(enabled(config, name) for name in ("sql_database", "sql_server_vm", "mysql_flexible_server", "mysql_vm", "oracle_vm")):
             derived.add("key_vault")
-        if enabled(config, "workspace") and "peering" in (active.get(("sql_database", "classic")), active.get(("mysql_flexible_server", "classic"))):
+        if enabled(config, "workspace") and "peering" in (active.get(("sql_database", "classic")), active.get(("mysql_flexible_server", "classic")), active.get(("sql_server_vm", "classic"))):
             derived.add("vnet_peering")
+        if active.get(("sql_server_vm", "serverless")) == "private_link":
+            derived.add("private_link_service")
     if enabled(config, "workspace") and any(mode == "private_link" for (_, compute), mode in active.items() if compute == "serverless"):
         derived.add("ncc")
     if enabled(config, "workspace") and config.get("lab_check", {}).get("enabled", True) and any(
@@ -640,7 +642,7 @@ def analyze(cloud, config, manifest, explicit=None, target_name=None, target=Non
         finding("error", "glue_federation.databricks_connectivity_enabled needs features.unity_catalog.")
     for source in sorted({path["source"] for path in paths}):
         method = lakeflow_method(cloud, config, source)
-        if method and source in disconnected:
+        if method and source in disconnected and not (cloud == "azure" and source == "sql_server_vm"):
             finding("info", f"{source} gets its Lakeflow Connect {method} setup from the lab check job, which needs a classic or serverless path; with none, the setup does not run.")
     vm_setups = {"sql_server_vm": "CDC", "mysql_vm": "binary log replication", "oracle_vm": "LogMiner CDC"}
     for name, method in vm_setups.items():
@@ -817,9 +819,17 @@ def deployment_info(cloud, deployment_id):
         "state_changed": state_file.stat().st_mtime if state_file.exists() else None,
         "verify": {"status": verify.get("status"), "checked_at": verify.get("checked_at"),
                    "checked": (artifacts / "verify.json").stat().st_mtime} if verify else None,
-        "apply_plan": saved_plan(artifacts, "apply"),
+        "apply_plan": saved_plan(artifacts, "apply") or recovery_plan(artifacts),
         "destroy_plan": saved_plan(artifacts, "destroy"),
     }
+
+
+def recovery_plan(artifacts):
+    path = artifacts / "recovery.plan.json"
+    if not path.exists() or Path(f"{path}.applied").exists():
+        return None
+    return {"path": display(path), "created": path.stat().st_mtime, "recovery": True,
+            "failed": Path(f"{path}.failed").exists()}
 
 
 def all_deployments():
@@ -869,6 +879,8 @@ def next_action(cloud, tfvars, info):
     # Saved plans older than an hour are re-planned rather than applied: the
     # cloud may have drifted and the summary the user reviewed is stale.
     destroy_plan, apply_plan = info["destroy_plan"], info["apply_plan"]
+    if apply_plan and apply_plan.get("recovery") and apply_plan.get("failed"):
+        return f"./infra recover-plan {cloud} {shown}", "a recovery state repair failed or was interrupted; inspect the damage again"
     if destroy_plan and now - destroy_plan["created"] < FRESH_PLAN_SECONDS:
         return f"./infra destroy {cloud} {shown} --confirm destroy-{cloud}", "a destroy plan was just reviewed and waits for confirmation"
     if destroy_plan:
@@ -876,6 +888,8 @@ def next_action(cloud, tfvars, info):
     if apply_plan and now - apply_plan["created"] < FRESH_PLAN_SECONDS:
         return f"./infra apply {cloud} {shown}", "a reviewed plan is waiting to be applied"
     if apply_plan:
+        if apply_plan.get("recovery"):
+            return f"./infra recover-plan {cloud} {shown}", "the saved recovery plan is old; inspect the cleanup damage again"
         return f"./infra plan {cloud} {shown}", f"the saved plan is {age(now - apply_plan['created'])} old; plan again and review it"
     if not info["resources"]:
         return f"./infra plan {cloud} {shown}", "nothing is deployed yet (run ./infra doctor first if authentication is not set up)"

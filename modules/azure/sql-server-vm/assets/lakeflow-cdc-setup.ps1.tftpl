@@ -156,6 +156,7 @@ DECLARE @sql NVARCHAR(MAX) = N'';
 IF USER_ID(@user) IS NULL
     SET @sql += N'CREATE USER ' + @u + N' FOR LOGIN ' + @u + N';';
 SET @sql += N'GRANT VIEW DATABASE PERFORMANCE STATE TO ' + @u + N';';
+SET @sql += N'GRANT VIEW DATABASE STATE TO ' + @u + N';';
 SET @sql += N'GRANT SELECT ON SCHEMA::dbo TO ' + @u + N';';
 SELECT @sql += N'GRANT SELECT ON OBJECT::sys.' + name + N' TO ' + @u + N';'
 FROM (VALUES (N'indexes'), (N'index_columns'), (N'columns'), (N'tables'),
