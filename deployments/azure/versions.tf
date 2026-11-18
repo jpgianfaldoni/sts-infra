@@ -10,8 +10,9 @@ terraform {
     azuread = { source = "hashicorp/azuread"
       version = "~> 3.0"
     }
+    # 1.137.0 added databricks_private_network_gateway.
     databricks = { source = "databricks/databricks"
-      version = "~> 1.100"
+      version = "~> 1.137"
     }
     random = { source = "hashicorp/random"
       version = "~> 3.6"

@@ -62,14 +62,21 @@ def sync_lab_check_credentials(ctx: Context, workspace_url: str, lab: dict) -> N
 
 
 def wait_for_serverless_rules(ctx: Context, outputs: dict, lab: dict, wait_seconds: int) -> list:
-    """Return readiness problems; never accept missing or deactivated rules."""
-    if not any((check or {}).get("compute") == "serverless" for check in (lab.get("checks") or {}).values()):
+    """Return readiness problems; never accept missing or deactivated rules.
+
+    Only Private Link paths have a rule. A private network gateway path has
+    none: Terraform waits for the gateway itself during apply.
+    """
+    def has_rule(check):
+        return (check or {}).get("compute") == "serverless" and (check or {}).get("mode") != "private_network_gateway"
+
+    if not any(has_rule(check) for check in (lab.get("checks") or {}).values()):
         return []
     connectivity = (outputs.get("serverless_connectivity") or {}).get("value") or {}
     ncc = connectivity.get("network_connectivity_config_id") or ""
     rules = dict(connectivity.get("rules") or {})
     for check in (lab.get("checks") or {}).values():
-        if (check or {}).get("compute") == "serverless":
+        if has_rule(check):
             rules.setdefault(check.get("source"), {})
     if not ncc:
         return [{"source": source, "rule_id": None, "state": "NO_NCC"} for source in rules]

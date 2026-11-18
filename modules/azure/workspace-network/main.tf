@@ -71,6 +71,27 @@ resource "azurerm_subnet" "test_vm" {
   default_outbound_access_enabled = false
 }
 
+# Delegated to Databricks for the serverless private network gateway, which
+# must be the only tenant of its subnet. It needs no NAT: the gateway only
+# forwards traffic to destinations that this VNet routes to.
+resource "azurerm_subnet" "gateway" {
+  count = var.gateway_subnet_cidr == null ? 0 : 1
+
+  name                            = "${var.resource_prefix}-gateway-snet"
+  resource_group_name             = azurerm_resource_group.this.name
+  virtual_network_name            = azurerm_virtual_network.this.name
+  address_prefixes                = [var.gateway_subnet_cidr]
+  default_outbound_access_enabled = false
+
+  delegation {
+    name = "databricks"
+    service_delegation {
+      name    = "Microsoft.Databricks/workspaces"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action", "Microsoft.Network/virtualNetworks/subnets/prepareNetworkPolicies/action", "Microsoft.Network/virtualNetworks/subnets/unprepareNetworkPolicies/action"]
+    }
+  }
+}
+
 resource "azurerm_subnet" "dns" {
   name                            = "${var.resource_prefix}-dns-snet"
   resource_group_name             = azurerm_resource_group.this.name

@@ -28,6 +28,13 @@ variable "test_vm_subnet_cidr" {
   default  = null
 }
 
+variable "gateway_subnet_cidr" {
+  description = "CIDR (/28 or larger) of the subnet delegated to the serverless private network gateway; null creates none."
+  type        = string
+  nullable    = true
+  default     = null
+}
+
 variable "dns_subnet_cidr" {
   type = string
 }

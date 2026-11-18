@@ -71,6 +71,18 @@ class EndpointTests(unittest.TestCase):
             self.assertEqual(verify.wait_for_serverless_rules(ctx, outputs, lab, 1), [])
             self.assertEqual(api.call_count, 2)
 
+    def test_private_network_gateway_paths_have_no_rule_to_wait_for(self):
+        gateway = {"source": "vm", "compute": "serverless", "mode": "private_network_gateway"}
+        outputs = {"serverless_connectivity": {"value": {"network_connectivity_config_id": "ncc", "rules": {}}}}
+        with patch.object(verify.clis, "databricks_account_cli") as api:
+            self.assertEqual(verify.wait_for_serverless_rules(None, outputs, {"checks": {"vm_serverless": gateway}}, 0), [])
+            api.assert_not_called()
+        # A Private Link source beside it is still held to its rule.
+        lab = {"checks": {"vm_serverless": gateway, "db_serverless": {"source": "db", "compute": "serverless", "mode": "private_link"}}}
+        with patch.object(verify.clis, "databricks_account_cli", return_value=(0, '{"items":[]}')):
+            problems = verify.wait_for_serverless_rules(None, outputs, lab, 0)
+        self.assertEqual([(p["source"], p["state"]) for p in problems], [("db", "MISSING")])
+
     def test_api_failure_and_missing_ncc_fail_closed(self):
         lab = {"checks": {"db_serverless": {"source": "db", "compute": "serverless"}}}
         self.assertEqual(verify.wait_for_serverless_rules(None, {}, lab, 0)[0]["state"], "NO_NCC")

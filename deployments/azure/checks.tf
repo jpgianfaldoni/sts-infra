@@ -28,3 +28,16 @@ check "browser_sso_without_public_access" {
     error_message = "Public workspace access is disabled without a browser_authentication endpoint. Browser SSO then needs another workspace in this region that provides one; otherwise set workspace_front_end_private_link.browser_authentication_enabled = true."
   }
 }
+
+# The region list grows during the preview, so this warns instead of failing.
+check "private_network_gateway_region" {
+  assert {
+    condition = !local.private_network_gateway_enabled || contains([
+      "australiaeast", "brazilsouth", "canadacentral", "centralindia", "centralus", "eastasia", "eastus", "eastus2",
+      "francecentral", "germanywestcentral", "japaneast", "koreacentral", "northcentralus", "northeurope",
+      "southcentralus", "southeastasia", "swedencentral", "switzerlandnorth", "uaenorth", "uksouth", "westcentralus",
+      "westeurope", "westus", "westus2", "westus3",
+    ], lower(replace(var.location, " ", "")))
+    error_message = "The private network gateway preview did not list ${var.location} as a supported region when this check was written; the gateway may stay in CREATING or fail. See the Azure Databricks private network gateway requirements."
+  }
+}

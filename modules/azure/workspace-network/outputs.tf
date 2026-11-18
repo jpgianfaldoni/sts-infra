@@ -34,6 +34,10 @@ output "test_vm_subnet_id" {
   value = try(azurerm_subnet.test_vm[0].id, null)
 }
 
+output "gateway_subnet_id" {
+  value = try(azurerm_subnet.gateway[0].id, null)
+}
+
 output "dns_subnet_id" {
   value = azurerm_subnet.dns.id
 }

@@ -109,6 +109,13 @@ print(f"Checking {compute} compute -> {params['source']} ({mode}) at {host}:{por
 
 
 def path_hint():
+    if compute == "serverless" and mode == "private_network_gateway":
+        return (
+            "Serverless compute reaches this source through the private network gateway in the workspace VNet. "
+            f"Check that the gateway is ESTABLISHED and lists {host} as a destination, that the NCC is attached to the "
+            "workspace, that the source's private DNS zone is linked to the workspace VNet, and that the source allows "
+            f"port {port} from the gateway subnet. A new gateway or destination can take several minutes to take effect."
+        )
     if compute == "serverless":
         return (
             "Serverless compute reaches this source through the NCC private endpoint. "

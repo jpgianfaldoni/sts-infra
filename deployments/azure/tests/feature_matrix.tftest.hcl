@@ -1273,3 +1273,185 @@ run "reject_mysql_private_link_without_feature" {
 
   expect_failures = [var.connectivity]
 }
+
+run "serverless_private_network_gateway_to_sql_server_vm" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      workspace_peering_enabled = true
+      private_dns_name          = "sqlserver.lab.exampledomain.com"
+    }
+    connectivity = {
+      sql_server_vm = {
+        serverless = "private_network_gateway"
+      }
+    }
+  }
+
+  assert {
+    condition     = length(module.private_network_gateway) == 1 && length(module.ncc) == 1 && length(module.network_connectivity_config) == 1
+    error_message = "The gateway needs its own NCC and the workspace binding even without private endpoint rules."
+  }
+
+  assert {
+    condition     = length(module.sql_server_vm_private_link_service) == 0 && output.pending_endpoint_approvals == []
+    error_message = "The gateway path must not create a Private Link Service or a private endpoint rule."
+  }
+
+  assert {
+    condition     = tolist(output.serverless_connectivity.private_network_gateway.destinations) == tolist(["sqlserver.lab.exampledomain.com"])
+    error_message = "The gateway must route exactly the SQL Server VM hostname."
+  }
+
+  assert {
+    condition     = output.serverless_connectivity.private_network_gateway.subnet_cidr == "10.70.5.0/28"
+    error_message = "The gateway must use the dedicated delegated subnet."
+  }
+
+  assert {
+    condition = (
+      output.lab_check.checks.sql_server_vm_classic.mode == "peering" &&
+      output.lab_check.checks.sql_server_vm_serverless.mode == "private_network_gateway" &&
+      output.lab_check.checks.sql_server_vm_serverless.run_after == "sql_server_vm_classic"
+    )
+    error_message = "Classic compute uses the peering and serverless compute the gateway, checked in that order."
+  }
+}
+
+run "private_network_gateway_and_private_link_share_one_ncc" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace             = true
+      sql_database          = true
+      mysql_flexible_server = true
+    }
+    sql_database = {
+      workspace_peering_enabled = true
+    }
+    connectivity = {
+      sql_database = {
+        serverless = "private_network_gateway"
+      }
+      mysql_flexible_server = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition     = length(module.network_connectivity_config) == 1 && length(module.private_network_gateway) == 1
+    error_message = "Private endpoint rules and the gateway must share one NCC."
+  }
+
+  assert {
+    condition     = length(module.ncc) == 1 && length(module.sql_database_workspace_peering) == 1
+    error_message = "One NCC module must hold the MySQL rule and the binding, and the gateway source must be peered."
+  }
+}
+
+run "no_gateway_subnet_without_a_gateway_path" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace    = true
+      sql_database = true
+    }
+    connectivity = {
+      sql_database = {
+        serverless = "private_link"
+      }
+    }
+  }
+
+  assert {
+    condition     = length(module.private_network_gateway) == 0 && output.serverless_connectivity.private_network_gateway == null
+    error_message = "Private Link alone must not create a gateway."
+  }
+
+  assert {
+    condition     = module.workspace_network[0].gateway_subnet_id == null
+    error_message = "The delegated gateway subnet exists only for a gateway path."
+  }
+}
+
+run "reject_private_network_gateway_without_peering" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      private_dns_name = "sqlserver.lab.exampledomain.com"
+    }
+    connectivity = {
+      sql_server_vm = {
+        serverless = "private_network_gateway"
+      }
+    }
+  }
+
+  expect_failures = [var.connectivity]
+}
+
+run "reject_private_network_gateway_small_subnet_and_bandwidth" {
+  command = plan
+
+  variables {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    workspace_network = {
+      vnet_cidr                    = "10.70.0.0/16"
+      host_subnet_cidr             = "10.70.0.0/24"
+      container_subnet_cidr        = "10.70.1.0/24"
+      private_endpoint_subnet_cidr = "10.70.2.0/26"
+      gateway_subnet_cidr          = "10.70.5.0/29"
+    }
+    private_network_gateway = {
+      bandwidth_tier_gbps = 20
+    }
+  }
+
+  expect_failures = [var.workspace_network, var.private_network_gateway]
+}
+
+run "warn_private_network_gateway_outside_preview_regions" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    location              = "norwayeast"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      workspace_peering_enabled = true
+      private_dns_name          = "sqlserver.lab.exampledomain.com"
+    }
+    connectivity = {
+      sql_server_vm = {
+        serverless = "private_network_gateway"
+      }
+    }
+  }
+
+  expect_failures = [check.private_network_gateway_region]
+}

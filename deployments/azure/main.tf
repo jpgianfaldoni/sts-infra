@@ -24,6 +24,7 @@ module "workspace_network" {
   container_subnet_cidr        = var.workspace_network.container_subnet_cidr
   private_endpoint_subnet_cidr = var.workspace_network.private_endpoint_subnet_cidr
   test_vm_subnet_cidr          = var.features.test_vm ? var.workspace_network.test_vm_subnet_cidr : null
+  gateway_subnet_cidr          = local.private_network_gateway_enabled ? var.workspace_network.gateway_subnet_cidr : null
   dns_subnet_cidr              = var.workspace_network.dns_subnet_cidr
   dns_server_ip                = var.features.custom_dns ? var.workspace_network.dns_server_ip : null
   tags                         = var.tags
@@ -170,8 +171,13 @@ module "sql_server_vm" {
   lakeflow_connect_enabled             = var.sql_server_vm.lakeflow_connect_enabled
   lakeflow_username                    = var.sql_server_vm.lakeflow_username
   private_dns_name                     = var.sql_server_vm.private_dns_name
-  allowed_sql_source_cidrs             = var.features.workspace && var.sql_server_vm.workspace_peering_enabled ? [var.workspace_network.host_subnet_cidr, var.workspace_network.container_subnet_cidr] : []
-  tags                                 = var.tags
+  # The gateway subnet is a source too when serverless compute arrives through
+  # the private network gateway and the same peering.
+  allowed_sql_source_cidrs = var.features.workspace && var.sql_server_vm.workspace_peering_enabled ? concat(
+    [var.workspace_network.host_subnet_cidr, var.workspace_network.container_subnet_cidr],
+    var.connectivity.sql_server_vm.serverless == "private_network_gateway" ? [var.workspace_network.gateway_subnet_cidr] : [],
+  ) : []
+  tags = var.tags
 }
 
 module "sql_server_vm_workspace_peering" {
@@ -399,12 +405,16 @@ locals {
 # Derived from variables only: the workspace waits for the NCC, so the NCC must
 # not depend on anything that depends on the workspace.
 locals {
-  serverless_private_link_enabled = var.features.workspace && anytrue([
-    var.features.sql_server_vm && var.connectivity.sql_server_vm.serverless == "private_link",
-    var.features.sql_database && var.connectivity.sql_database.serverless == "private_link",
-    var.features.mysql_flexible_server && var.connectivity.mysql_flexible_server.serverless == "private_link",
-  ])
-  network_connectivity_config_id = !local.serverless_private_link_enabled ? null : (
+  serverless_modes = {
+    sql_server_vm         = var.features.workspace && var.features.sql_server_vm ? var.connectivity.sql_server_vm.serverless : "none"
+    sql_database          = var.features.workspace && var.features.sql_database ? var.connectivity.sql_database.serverless : "none"
+    mysql_flexible_server = var.features.workspace && var.features.mysql_flexible_server ? var.connectivity.mysql_flexible_server.serverless : "none"
+  }
+  serverless_private_link_enabled = contains(values(local.serverless_modes), "private_link")
+  private_network_gateway_enabled = contains(values(local.serverless_modes), "private_network_gateway")
+  # Private endpoint rules and the gateway share one NCC.
+  serverless_ncc_enabled = local.serverless_private_link_enabled || local.private_network_gateway_enabled
+  network_connectivity_config_id = !local.serverless_ncc_enabled ? null : (
     var.existing_network_connectivity_config_id != null
     ? var.existing_network_connectivity_config_id
     : module.network_connectivity_config[0].network_connectivity_config_id
@@ -414,7 +424,7 @@ locals {
 # Created before the workspace and destroyed after it: Databricks refuses to
 # delete an NCC that is still attached to a workspace.
 module "network_connectivity_config" {
-  count  = local.serverless_private_link_enabled && var.existing_network_connectivity_config_id == null ? 1 : 0
+  count  = local.serverless_ncc_enabled && var.existing_network_connectivity_config_id == null ? 1 : 0
   source = "../../modules/azure/network-connectivity-config"
   providers = {
     databricks.account = databricks.account
@@ -424,8 +434,10 @@ module "network_connectivity_config" {
   region = var.location
 }
 
+# Attaches the NCC to the workspace; with only a private network gateway it
+# holds no private endpoint rules.
 module "ncc" {
-  count  = length(local.serverless_private_endpoint_rules) > 0 ? 1 : 0
+  count  = local.serverless_ncc_enabled ? 1 : 0
   source = "../../modules/azure/ncc"
   providers = {
     databricks.account = databricks.account
@@ -436,6 +448,42 @@ module "ncc" {
   private_endpoint_rules         = local.serverless_private_endpoint_rules
 
   depends_on = [module.sql_database, module.mysql_flexible_server, module.sql_server_vm_private_link_service]
+}
+
+locals {
+  # Hostnames serverless compute reaches through the gateway. Each resolves
+  # through a private DNS zone that the source's peering links to the workspace
+  # VNet, which is where the gateway looks names up.
+  private_network_gateway_destinations = concat(
+    local.serverless_modes.sql_server_vm == "private_network_gateway" ? [var.sql_server_vm.private_dns_name] : [],
+    local.serverless_modes.sql_database == "private_network_gateway" ? [module.sql_database[0].host] : [],
+    local.serverless_modes.mysql_flexible_server == "private_network_gateway" ? [module.mysql_flexible_server[0].host] : [],
+  )
+}
+
+module "private_network_gateway" {
+  count  = local.private_network_gateway_enabled ? 1 : 0
+  source = "../../modules/azure/private-network-gateway"
+  providers = {
+    databricks.account = databricks.account
+  }
+
+  name                           = "${local.name_prefix}-png"
+  databricks_account_id          = var.databricks_account_id
+  network_connectivity_config_id = local.network_connectivity_config_id
+  subnet_id                      = module.workspace_network[0].gateway_subnet_id
+  destinations                   = local.private_network_gateway_destinations
+  bandwidth_tier_gbps            = var.private_network_gateway.bandwidth_tier_gbps
+  private_dns_resolvers          = var.private_network_gateway.private_dns_resolvers
+
+  # After module.ncc: Databricks rejects concurrent updates to one NCC, and the
+  # NCC must be attached to the workspace. The peerings carry the traffic.
+  depends_on = [
+    module.ncc,
+    module.sql_server_vm_workspace_peering,
+    module.sql_database_workspace_peering,
+    module.mysql_flexible_server_workspace_peering,
+  ]
 }
 
 moved {

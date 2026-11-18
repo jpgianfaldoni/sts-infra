@@ -122,6 +122,12 @@ connectivity = {
 
 Set both paths to `none` for a lab where you build the connection yourself.
 
+On Azure, classic compute uses VNet peering (`<source>.workspace_peering_enabled`)
+and serverless compute uses `private_link` or `private_network_gateway`. The
+[private network gateway](guides/azure/serverless/private-network-gateway.md)
+brings serverless compute into the workspace VNet, where it follows the same
+peering as classic compute.
+
 ### 3. Log in
 
 ```bash
@@ -226,6 +232,7 @@ deleted workspace, and secrets restored with a soft-deleted Key Vault; see
 | Azure | `workspace-sql-serverless-private-link` | Azure SQL from serverless (Private Link) and classic (peering) compute, plus a test VM |
 | Azure | `workspace-sql-server-vm-lakeflow-cdc` | SQL Server on a VM, prepared for Lakeflow Connect CDC, with no network path |
 | Azure | `workspace-sql-server-vm-private-link` | SQL Server on a VM, prepared for CDC, with classic peering and serverless Private Link |
+| Azure | `workspace-sql-server-vm-private-network-gateway` | SQL Server on a VM, prepared for CDC, with classic peering and a serverless private network gateway |
 | Azure | `workspace-mysql-vm-lakeflow-cdc` | MySQL on a VM, prepared for Lakeflow Connect, with no network path |
 | Azure | `workspace-oracle-vm-lakeflow-cdc` | Oracle Database Free on a VM, prepared for Lakeflow Connect, with no network path |
 | Azure | `workspace-sql` | Workspace and a private Azure SQL database, not connected |
