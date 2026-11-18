@@ -43,7 +43,10 @@ Clarify these phrasings instead of guessing:
   is available. Say so, and configure the serverless path the user wants.
   Serverless-only workspaces without a customer network are not supported yet.
 - "On-premises": AWS only, as the simulated on-premises network
-  (`simulated_on_prem`).
+  (`simulated_on_prem`). On Azure, offer SQL Server on a VM in a separate
+  VNet as a simulation; `workspace-sql-server-vm-private-link` connects it to
+  classic compute through peering and serverless compute through Private Link.
+  This creates no VPN or ExpressRoute connection to an actual external site.
 - MySQL: RDS for MySQL (`rds_mysql`) on AWS; Azure Database for MySQL Flexible
   Server (`mysql_flexible_server`) or MySQL on a VM (`mysql_vm`) on Azure.
 - Oracle: RDS for Oracle (`rds_oracle`, non-multitenant Standard Edition 2) on
@@ -181,6 +184,14 @@ it before a long apply or destroy with `./infra setup aws <environment.tfvars>
   existed; remind the user to destroy labs they no longer need.
 
 ## 5. Troubleshoot
+
+For Azure labs partially deleted by automated cleanup, run
+`./infra recover-plan azure <tfvars>`, show its saved summary (including every
+`forget:`, `import:`, `replace:`, and `delete:` line), then use `./infra apply`.
+Repeat the recovery plan/review/apply loop until no changes remain, then verify.
+Recovery stages repair state for confirmed deleted objects, restore missing
+workspace/vault parents, and import recovered secrets through Terraform before
+recreating other resources. See [cleanup recovery](guides/operations/deployment.md#recover-after-azure-cleanup).
 
 | Symptom | Cause and fix |
 | --- | --- |

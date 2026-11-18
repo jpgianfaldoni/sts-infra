@@ -185,6 +185,7 @@ fails at `tcp`.
 | `./infra status <cloud> <tfvars>` | Where a lab stands and the next command to run |
 | `./infra output <cloud> <tfvars> --json` | Hostnames, IDs, and other outputs, with secrets redacted |
 | `./infra endpoints <cloud> status <tfvars>` | Serverless private endpoints and their approval state |
+| `./infra recover-plan azure <tfvars>` | Inspect cleanup damage and save the next recovery stage for review and `./infra apply` |
 | `./infra vm-setup-status azure <tfvars>` | Setup result of each database VM, including the failure line when one failed |
 | `./infra state-forget <cloud> <tfvars> <address> --confirm forget-<cloud>-<id>` | Drop a resource the cloud already deleted from the lab's state |
 
@@ -192,6 +193,13 @@ Run `./infra` with no arguments for the full list. Reporting commands such as
 `doctor`, `explain`, `status`, `ls`, and `verify` take `--json`, and the exit
 codes are stable: `0` ok, `10` browser login needed, `11` wrong account or
 profile, `12` missing tool, `13` a check failed.
+
+If automated cleanup removed part of an Azure lab, use
+`./infra recover-plan azure <tfvars>`, review its summary, then run
+`./infra apply azure <tfvars>`. Repeat until the recovery plan has no changes,
+then run `verify`. Recovery handles stale NCC rules, resources belonging to a
+deleted workspace, and secrets restored with a soft-deleted Key Vault; see
+[cleanup recovery](guides/operations/deployment.md#recover-after-azure-cleanup).
 
 ## What you can build
 
@@ -217,6 +225,7 @@ profile, `12` missing tool, `13` a check failed.
 | Azure | `serverless-mysql` | Serverless compute reads private Azure Database for MySQL, prepared for Lakeflow Connect |
 | Azure | `workspace-sql-serverless-private-link` | Azure SQL from serverless (Private Link) and classic (peering) compute, plus a test VM |
 | Azure | `workspace-sql-server-vm-lakeflow-cdc` | SQL Server on a VM, prepared for Lakeflow Connect CDC, with no network path |
+| Azure | `workspace-sql-server-vm-private-link` | SQL Server on a VM, prepared for CDC, with classic peering and serverless Private Link |
 | Azure | `workspace-mysql-vm-lakeflow-cdc` | MySQL on a VM, prepared for Lakeflow Connect, with no network path |
 | Azure | `workspace-oracle-vm-lakeflow-cdc` | Oracle Database Free on a VM, prepared for Lakeflow Connect, with no network path |
 | Azure | `workspace-sql` | Workspace and a private Azure SQL database, not connected |

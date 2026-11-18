@@ -82,6 +82,9 @@ output "sql_server_vm" {
     lakeflow_username             = module.sql_server_vm[0].lakeflow_username
     lakeflow_password_secret_name = local.sql_server_vm_lakeflow && local.key_vault_enabled ? "sql-server-vm-lakeflow-password" : null
     lakeflow_cdc                  = module.sql_server_vm[0].lakeflow_cdc
+    database                      = module.sql_server_vm[0].database_name
+    workspace_peering_enabled     = length(module.sql_server_vm_workspace_peering) > 0
+    private_link_service_id       = try(module.sql_server_vm_private_link_service[0].id, null)
   }, null)
 }
 output "sql_server_vm_password" {

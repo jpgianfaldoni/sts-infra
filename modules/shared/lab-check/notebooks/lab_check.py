@@ -17,6 +17,7 @@
 
 import importlib
 import importlib.metadata
+import ipaddress
 import json
 import re
 import socket
@@ -44,6 +45,7 @@ PARAMETERS = (
     "cdc_method",
     "cdc_username_key",
     "cdc_password_key",
+    "network_wait_seconds",
 )
 for name in PARAMETERS:
     dbutils.widgets.text(name, "")
@@ -75,6 +77,8 @@ DRIVERS = {
     ),
 }
 TCP_TIMEOUT_SECONDS = 15
+# Retry only network probes, before loading drivers, credentials, or seed data.
+NETWORK_WAIT_SECONDS = min(900, max(0, int(params["network_wait_seconds"] or ("600" if compute == "serverless" else "0"))))
 SAMPLE_TABLES = ("customers", "orders")
 # Databricks' SQL Server utility objects script for Lakeflow Connect source setup.
 LAKEFLOW_UTILITY_SCRIPT_URL = "https://learn.microsoft.com/en-us/azure/databricks/_extras/documents/utility_script.sql"
@@ -109,7 +113,7 @@ def path_hint():
         return (
             "Serverless compute reaches this source through the NCC private endpoint. "
             f"Run ./infra endpoints {cloud} status: the connection must be approved and the rule "
-            "ESTABLISHED, which can take about 10 minutes after approval."
+            "active (not deactivated) and ESTABLISHED. Private DNS and TCP can take about 10 minutes after approval."
         )
     hints = {
         "peering": f"Check the peering routes and that the source's security rules allow port {port} from the workspace network.",
@@ -161,20 +165,45 @@ def fail_unexpected(error):
 
 
 def check_network():
-    try:
-        addresses = sorted({info[4][0] for info in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)})
-    except socket.gaierror as error:
-        fail("dns", f"could not resolve {host} ({error}).", path_hint())
-    result["resolved"] = addresses
-    enter("tcp")
     started = time.monotonic()
-    try:
-        with socket.create_connection((host, port), timeout=TCP_TIMEOUT_SECONDS):
-            pass
-    except OSError as error:
-        fail("tcp", f"could not open a TCP connection to {host}:{port} within {TCP_TIMEOUT_SECONDS}s ({error}).", path_hint())
-    result["tcp_ms"] = round((time.monotonic() - started) * 1000)
-    print(f"TCP connection succeeded in {result['tcp_ms']} ms; {host} resolved to {', '.join(addresses)}")
+    deadline = started + NETWORK_WAIT_SECONDS
+    attempts = 0
+    while True:
+        attempts += 1
+        enter("dns")
+        try:
+            addresses = sorted({info[4][0] for info in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)})
+            if not addresses:
+                raise OSError("DNS returned no addresses")
+            for address in addresses:
+                ip = ipaddress.ip_address(address)
+                ip = getattr(ip, "ipv4_mapped", None) or ip
+                if not ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
+                    raise OSError(f"private network path resolved to a non-private address: {address}")
+            result["resolved"] = addresses
+            enter("tcp")
+            tcp_started = time.monotonic()
+            attempt_deadline = deadline if NETWORK_WAIT_SECONDS else tcp_started + TCP_TIMEOUT_SECONDS
+            for address in addresses:
+                try:
+                    timeout = min(TCP_TIMEOUT_SECONDS, max(0.1, attempt_deadline - time.monotonic()))
+                    with socket.create_connection((address, port), timeout=timeout):
+                        pass
+                    break
+                except OSError:
+                    if address == addresses[-1] or time.monotonic() >= attempt_deadline:
+                        raise
+            result["tcp_ms"] = round((time.monotonic() - tcp_started) * 1000)
+            result["network_attempts"] = attempts
+            result["network_wait_ms"] = round((time.monotonic() - started) * 1000)
+            print(f"TCP connection succeeded in {result['tcp_ms']} ms; {host} resolved to {', '.join(addresses)}")
+            return
+        except OSError as error:
+            message = f"{host}:{port}: {error} (network attempt {attempts})"
+            if time.monotonic() >= deadline:
+                fail(stage, message, path_hint())
+            print(f"Waiting for private {stage}: {message}")
+            time.sleep(min(15, max(0, deadline - time.monotonic())))
 
 
 def load_driver():

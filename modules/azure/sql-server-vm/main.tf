@@ -70,6 +70,20 @@ resource "azurerm_network_security_group" "vm" {
   location            = var.location
   resource_group_name = azurerm_resource_group.this.name
   tags                = var.tags
+  dynamic "security_rule" {
+    for_each = length(var.allowed_sql_source_cidrs) > 0 ? [1] : []
+    content {
+      name                       = "AllowSqlFromPeeredNetworks"
+      priority                   = 110
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = "1433"
+      source_address_prefixes    = var.allowed_sql_source_cidrs
+      destination_address_prefix = var.vm_private_ip
+    }
+  }
   security_rule {
     name                       = "AllowSqlFromPrivateLinkService"
     priority                   = 100

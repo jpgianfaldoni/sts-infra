@@ -759,7 +759,7 @@
           "classic_path_option": "workspace_peering_enabled"
         },
         "sql_server_vm": {
-          "summary": "Private SQL Server 2022 VM and a network prepared for an Azure Private Link Service exercise; prepared for Lakeflow Connect CDC from inside the VM, with sample tables",
+          "summary": "Private SQL Server 2022 VM with sample data and Lakeflow Connect CDC setup; optional classic VNet peering and serverless Private Link",
           "module": "sql-server-vm",
           "feature": "features.sql_server_vm",
           "dependencies": [],
@@ -780,12 +780,28 @@
               "path": "sql_server_vm.private_dns_name",
               "type": "string",
               "default": null,
-              "description": "Private hostname for SQL Server, such as sqlserver.lab.internal, for a Unity Catalog connection to use. A private DNS zone linked only to the SQL VNet resolves it to the VM; it adds no network path."
+              "description": "Private SQL Server hostname, such as sqlserver.lab.exampledomain.com. Required for serverless Private Link, which does not support private-use TLDs such as .internal; also resolved from the workspace when peering is enabled."
+            },
+            "workspace_peering_enabled": {
+              "path": "sql_server_vm.workspace_peering_enabled",
+              "type": "bool",
+              "default": false,
+              "description": "Peer the SQL Server VM VNet with the workspace and link its private DNS zone for classic compute."
             }
           },
           "minutes": 20,
           "cost": "high",
-          "cost_note": "SQL Server VM license bills hourly"
+          "cost_note": "SQL Server VM license bills hourly",
+          "connectivity": {
+            "serverless": {
+              "path": "connectivity.sql_server_vm.serverless",
+              "modes": [
+                "none",
+                "private_link"
+              ]
+            }
+          },
+          "classic_path_option": "workspace_peering_enabled"
         },
         "mysql_flexible_server": {
           "summary": "Private Azure Database for MySQL Flexible Server with a private endpoint and private DNS, with sample tables loaded by ./infra verify and binary logging for Lakeflow Connect",
@@ -915,12 +931,11 @@
           "cost": "low"
         },
         "vnet_peering": {
-          "summary": "Peering between the workspace VNet and the SQL VNet, with the SQL private DNS zone linked to the workspace",
+          "summary": "Peering between the workspace VNet and each configured database VNet, with the source private DNS zone linked to the workspace",
           "module": "vnet-peering",
           "feature": "derived.sql_workspace_peering",
           "dependencies": [
-            "workspace",
-            "sql_database"
+            "workspace"
           ],
           "minutes": 3,
           "cost": "low"
@@ -949,12 +964,22 @@
           "minutes": 2,
           "cost": "low",
           "cost_note": "Compute bills only while ./infra verify runs the job"
+        },
+        "private_link_service": {
+          "summary": "Internal Standard Load Balancer and Private Link Service for serverless compute to reach the SQL Server VM; ./infra approves only this deployment's endpoint",
+          "module": "private-link-service",
+          "feature": "derived.sql_server_vm_private_link",
+          "dependencies": [
+            "sql_server_vm"
+          ],
+          "minutes": 5,
+          "cost": "low"
         }
       },
       "connectivity_modes": {
         "none": "No network path: this compute type cannot reach the source (useful for networking exercises).",
         "peering": "VNet peering between the workspace VNet and the source VNet, with the source's private DNS zone linked to the workspace.",
-        "private_link": "Azure Private Link: an NCC private endpoint rule that Databricks provisions to the source for serverless compute."
+        "private_link": "Azure Private Link: an NCC private endpoint rule to a managed source or to an internal load balancer and Private Link Service for a database VM."
       }
     }
   }

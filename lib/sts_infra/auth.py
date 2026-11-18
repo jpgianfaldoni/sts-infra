@@ -488,6 +488,8 @@ def workspace_auth_requirement(ctx: Context):
         return "not_required", "endpoint decisions use only cloud credentials"
     if ctx.auth_action == "inspect":
         return "not_required", "reading VM setup results uses only Azure credentials"
+    if ctx.auth_action == "recover":
+        return "not_required", "cleanup recovery verifies Azure and account access; the old workspace may have been deleted"
     if ctx.auth_action == "verify":
         return "required", "verify runs the lab check job in the workspace"
     if ctx.cloud == "aws" and ctx.auth_action == "destroy":

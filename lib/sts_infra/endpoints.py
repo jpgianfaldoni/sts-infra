@@ -15,6 +15,38 @@ from .common import Usage, die, env_int, err, items_of, out, parse_json
 from .context import Context
 
 
+def rule_problems(expected: dict, listed) -> list[dict]:
+    """Check every expected rule, including rules omitted by the account API.
+
+    Deleted NCC rules can retain connection_state=ESTABLISHED until purge.
+    That state alone is never evidence that a rule can carry traffic.
+    """
+    live = {rule.get("rule_id"): rule for rule in items_of(listed, "items", "rules") if isinstance(rule, dict)}
+    problems = []
+    for source, saved in expected.items():
+        rule_id = saved.get("rule_id") if isinstance(saved, dict) else None
+        rule = live.get(rule_id) if rule_id else None
+        state = "MISSING" if rule is None else (
+            "DEACTIVATED" if rule.get("deactivated") else rule.get("connection_state") or "UNKNOWN"
+        )
+        if state != "ESTABLISHED":
+            problems.append({"source": source, "rule_id": rule_id, "state": state})
+    return problems
+
+
+def valid_rule_list(value) -> bool:
+    if isinstance(value, dict):
+        if value.get("next_page_token") or not any(isinstance(value.get(key), list) for key in ("items", "rules")):
+            return False
+        value = items_of(value, "items", "rules")
+    if not isinstance(value, list):
+        return False
+    if not all(isinstance(rule, dict) and isinstance(rule.get("rule_id"), str) and rule["rule_id"]
+               and (rule.get("deactivated") is None or isinstance(rule["deactivated"], bool)) for rule in value):
+        return False
+    return len({rule["rule_id"] for rule in value}) == len(value)
+
+
 def wait_interval(default: int = 15) -> int:
     return env_int("STS_INFRA_WAIT_INTERVAL", default)
 

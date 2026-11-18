@@ -24,6 +24,11 @@ variable "vm_private_ip" {
   type    = string
   default = "10.90.1.4"
 }
+variable "allowed_sql_source_cidrs" {
+  description = "Additional private networks allowed to reach SQL Server, such as a peered workspace VNet."
+  type        = list(string)
+  default     = []
+}
 variable "vm_size" {
   type    = string
   default = "Standard_D4s_v5"

@@ -6,6 +6,23 @@ locals {
   lab_check_sql_scope       = var.features.workspace && local.key_vault_enabled && var.key_vault.databricks_secret_scope_enabled ? var.key_vault.secret_scope_name : null
 
   lab_check_sources = merge(
+    var.features.sql_server_vm ? {
+      sql_server_vm = {
+        engine           = local.lab_check_sql_scope == null ? "tcp" : "sqlserver"
+        classic          = var.sql_server_vm.workspace_peering_enabled ? "peering" : "none"
+        serverless       = var.connectivity.sql_server_vm.serverless
+        host             = coalesce(module.sql_server_vm[0].hostname, module.sql_server_vm[0].host)
+        port             = module.sql_server_vm[0].port
+        database         = module.sql_server_vm[0].database_name
+        seed_file        = local.lab_check_sql_scope == null ? null : module.sql_server_vm[0].seed_file
+        secret_scope     = local.lab_check_sql_scope
+        username_key     = "sql-server-vm-sql-username"
+        password_key     = "sql-server-vm-sql-password"
+        cdc_method       = local.lab_check_sql_scope != null && local.sql_server_vm_lakeflow ? "sqlserver_cdc" : null
+        cdc_username_key = "sql-server-vm-lakeflow-username"
+        cdc_password_key = "sql-server-vm-lakeflow-password"
+      }
+    } : {},
     var.features.sql_database ? {
       sql_database = {
         engine       = local.lab_check_sql_scope == null ? "tcp" : "sqlserver"
@@ -88,5 +105,5 @@ module "lab_check" {
   # The module's data sources call the workspace API, so they wait for the
   # workspace (deferred to apply time when it is new), and the Key
   # Vault-backed scope must exist before a run reads it.
-  depends_on = [module.workspace, module.key_vault]
+  depends_on = [module.workspace, module.key_vault, module.sql_server_vm_workspace_peering, module.sql_server_vm_private_link_service]
 }
