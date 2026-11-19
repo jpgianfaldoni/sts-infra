@@ -717,7 +717,8 @@
               "path": "connectivity.sql_database.serverless",
               "modes": [
                 "none",
-                "private_link"
+                "private_link",
+                "private_network_gateway"
               ]
             }
           },
@@ -726,7 +727,7 @@
               "path": "sql_database.workspace_peering_enabled",
               "type": "bool",
               "default": false,
-              "description": "Peer the SQL VNet with the workspace VNet and link its private DNS zone for classic compute and the test VM."
+              "description": "Peer the SQL VNet with the workspace VNet and link its private DNS zone for classic compute and the test VM. Also required when serverless compute uses the private network gateway."
             },
             "entra_admin_enabled": {
               "path": "sql_database.entra_admin_enabled",
@@ -759,7 +760,7 @@
           "classic_path_option": "workspace_peering_enabled"
         },
         "sql_server_vm": {
-          "summary": "Private SQL Server 2022 VM with sample data and Lakeflow Connect CDC setup; optional classic VNet peering and serverless Private Link",
+          "summary": "Private SQL Server 2022 VM with sample data and Lakeflow Connect CDC setup; optional classic VNet peering and serverless Private Link or private network gateway",
           "module": "sql-server-vm",
           "feature": "features.sql_server_vm",
           "dependencies": [],
@@ -780,13 +781,13 @@
               "path": "sql_server_vm.private_dns_name",
               "type": "string",
               "default": null,
-              "description": "Private SQL Server hostname, such as sqlserver.lab.exampledomain.com. Required for serverless Private Link, which does not support private-use TLDs such as .internal; also resolved from the workspace when peering is enabled."
+              "description": "Private SQL Server hostname, such as sqlserver.lab.exampledomain.com. Required for every serverless path: Private Link (which does not support private-use TLDs such as .internal) and the private network gateway, which routes by DNS name; also resolved from the workspace when peering is enabled."
             },
             "workspace_peering_enabled": {
               "path": "sql_server_vm.workspace_peering_enabled",
               "type": "bool",
               "default": false,
-              "description": "Peer the SQL Server VM VNet with the workspace and link its private DNS zone for classic compute."
+              "description": "Peer the SQL Server VM VNet with the workspace and link its private DNS zone for classic compute. Also required when serverless compute uses the private network gateway."
             }
           },
           "minutes": 20,
@@ -797,7 +798,8 @@
               "path": "connectivity.sql_server_vm.serverless",
               "modes": [
                 "none",
-                "private_link"
+                "private_link",
+                "private_network_gateway"
               ]
             }
           },
@@ -813,7 +815,8 @@
               "path": "connectivity.mysql_flexible_server.serverless",
               "modes": [
                 "none",
-                "private_link"
+                "private_link",
+                "private_network_gateway"
               ]
             }
           },
@@ -822,7 +825,7 @@
               "path": "mysql_flexible_server.workspace_peering_enabled",
               "type": "bool",
               "default": false,
-              "description": "Peer the MySQL VNet with the workspace VNet and link its private DNS zone for classic compute."
+              "description": "Peer the MySQL VNet with the workspace VNet and link its private DNS zone for classic compute. Also required when serverless compute uses the private network gateway."
             },
             "version": {
               "path": "mysql_flexible_server.version",
@@ -895,9 +898,9 @@
           "cost_note": "Standard_D2s_v5 VM and NAT gateway; Oracle Database Free needs no license"
         },
         "ncc": {
-          "summary": "Network Connectivity Configuration with a private endpoint rule to each source serverless compute reaches over Private Link",
+          "summary": "Network Connectivity Configuration attached to the workspace, holding a private endpoint rule for each source serverless compute reaches over Private Link and the private network gateway when a source uses it",
           "module": "ncc",
-          "feature": "derived.serverless_private_link",
+          "feature": "derived.serverless_ncc",
           "dependencies": [
             "workspace"
           ],
@@ -906,7 +909,7 @@
               "path": "existing_network_connectivity_config_id",
               "type": "string",
               "default": null,
-              "description": "Reuse an existing Databricks NCC for serverless private endpoint rules."
+              "description": "Reuse an existing Databricks NCC for serverless private endpoint rules and the private network gateway (an NCC holds at most two gateways)."
             },
             "endpoint_approval": {
               "path": "endpoint_approval",
@@ -974,12 +977,52 @@
           ],
           "minutes": 5,
           "cost": "low"
+        },
+        "private_network_gateway": {
+          "summary": "Databricks private network gateway (Public Preview) on the NCC, in a subnet of the workspace VNet delegated to Databricks; serverless compute reaches each listed source hostname through it and the source's VNet peering",
+          "module": "private-network-gateway",
+          "feature": "derived.serverless_private_network_gateway",
+          "dependencies": [
+            "workspace",
+            "ncc",
+            "vnet_peering"
+          ],
+          "options": {
+            "gateway_subnet_cidr": {
+              "path": "workspace_network.gateway_subnet_cidr",
+              "type": "string",
+              "default": "10.70.5.0/28",
+              "description": "Dedicated workspace VNet subnet (/28 or larger) delegated to Microsoft.Databricks/workspaces for the gateway."
+            },
+            "bandwidth_tier_gbps": {
+              "path": "private_network_gateway.bandwidth_tier_gbps",
+              "type": "number",
+              "default": 10,
+              "description": "Provisioned bandwidth in Gbps: 10, 30, 50, or 100. Databricks bills the gateway by tier."
+            },
+            "private_dns_resolvers": {
+              "path": "private_network_gateway.private_dns_resolvers",
+              "type": "list(string)",
+              "default": [],
+              "description": "Up to two DNS resolver IPs reachable from the gateway subnet. Empty uses Azure-provided DNS, which resolves the private DNS zones linked to the workspace VNet."
+            },
+            "manual": {
+              "path": "private_network_gateway.manual",
+              "type": "bool",
+              "default": false,
+              "description": "Practice mode: create only the delegated subnet and the source firewall rule, and leave the NCC, its workspace attachment, and the gateway for the user to create by hand. ./infra verify then checks the serverless path."
+            }
+          },
+          "minutes": 15,
+          "cost": "high",
+          "cost_note": "Databricks bills the gateway by provisioned bandwidth tier while it exists (billing starts on or after December 1, 2026)"
         }
       },
       "connectivity_modes": {
         "none": "No network path: this compute type cannot reach the source (useful for networking exercises).",
         "peering": "VNet peering between the workspace VNet and the source VNet, with the source's private DNS zone linked to the workspace.",
-        "private_link": "Azure Private Link: an NCC private endpoint rule to a managed source or to an internal load balancer and Private Link Service for a database VM."
+        "private_link": "Azure Private Link: an NCC private endpoint rule to a managed source or to an internal load balancer and Private Link Service for a database VM.",
+        "private_network_gateway": "Azure Databricks private network gateway (Public Preview, serverless only): a gateway on the NCC enters a delegated subnet of the workspace VNet and routes the source's hostname on through the source's VNet peering. Requires the source's workspace_peering_enabled."
       }
     }
   }

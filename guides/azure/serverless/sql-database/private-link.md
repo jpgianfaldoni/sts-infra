@@ -1,225 +1,79 @@
-# Connect Azure Databricks serverless to private SQL Server resources
+# Manually connect serverless compute to Azure SQL Database with Private Link
 
-## Automated path for Azure SQL Database
+This guide connects Azure Databricks serverless compute to an Azure SQL
+Database that has public access disabled, using a Network Connectivity
+Configuration (NCC) and a private endpoint rule. It uses the Azure portal, the
+Azure Databricks account console, and the workspace UI.
 
-For Azure SQL Database, Terraform creates the serverless networking objects:
+For SQL Server on an Azure VM, which needs a load balancer and a Private Link
+service, see the [manual networking guides](../../manual/README.md).
 
-```hcl
-databricks_account_id = "<azure-databricks-account-id>"
 
-features = {
-  workspace    = true
-  sql_database = true
-}
+It assumes the Azure SQL logical server and database already exist. Database
+deployment and schema management are out of scope.
 
-connectivity = {
-  sql_database = {
-    serverless = "private_link"
-  }
-}
-```
-
-The plan creates a Network Connectivity Configuration (NCC) in the workspace
-region, binds it to the workspace, and adds a private endpoint rule for the
-SQL logical server (`group_id = "sqlServer"`). Set
-`existing_network_connectivity_config_id` to add the rule to an NCC that
-already serves the workspace. Start from
-`environments/examples/azure/workspace-sql-serverless-private-link.tfvars`.
-
-Databricks then creates a managed private endpoint that stays **Pending** until
-the SQL server owner approves it. With the default `endpoint_approval = "auto"`,
-`./infra apply` approves exactly the connections this deployment requested.
-To practice the approval step yourself, set `endpoint_approval = "manual"`:
-
-```bash
-./infra apply azure environments/local/my-sql.tfvars
-./infra endpoints azure status environments/local/my-sql.tfvars
-# Review component, resource_id, endpoint_name, and connection_id, then:
-./infra endpoints azure approve environments/local/my-sql.tfvars \
-  --connection-id <connection_id>
-```
-
-`status` lists `pending_endpoint_approvals` with the live `azure_status` and
-the `connection_id` to approve. After approval, the rule reports `ESTABLISHED`
-a few minutes later, and serverless compute can reach
-`<server>.database.windows.net:1433`. Then run:
-
-```bash
-./infra verify azure environments/local/my-sql.tfvars
-```
-
-`verify` waits for the rule to become `ESTABLISHED`, loads the sample tables
-`customers` and `orders`, and reports whether serverless (and, with
-`sql_database.workspace_peering_enabled = true`, classic) compute reaches the
-database. Create the Unity Catalog connection as described in
-[Configure the SQL connection](#8-configure-the-sql-connection); the SQL
-credentials are in the Key Vault and the Key Vault-backed secret scope
-described in the [deployment notes](overview.md).
-
-## Automated path for SQL Server on a VM
-
-Start from `environments/examples/azure/workspace-sql-server-vm-private-link.tfvars`
-to create a VNet-injected workspace and SQL Server in a separate Azure VNet.
-This simulates an on-premises source; it creates no connection to a real
-external network.
-
-`sql_server_vm.workspace_peering_enabled = true` creates peering, allows SQL
-traffic from the classic compute subnets, and links the database's private
-DNS zone to the workspace. `connectivity.sql_server_vm.serverless = "private_link"`
-creates an internal Standard Load Balancer, a Private Link Service, and an
-NCC rule using `sql_server_vm.private_dns_name` as its application hostname.
-The custom service rule uses `domain_names`, with no `group_id`.
-Use a hostname such as `sqlserver.lab.exampledomain.com`: serverless Private Link
-does not support private-use TLDs such as `.internal`, `.localhost`, or `.test`.
-
-The service has no public frontend and no automatically approved subscriptions.
-By default, `./infra apply` approves only the Databricks endpoint returned by
-this deployment's NCC. `endpoint_approval = "manual"` leaves it pending for
-the manual exercise below.
-
-During apply, Azure VM Run Command starts SQL Server Agent, loads `demo` with
-three customers and five orders, installs the Lakeflow utility objects,
-creates the `lakeflow` ingestion login, and enables and tests CDC capture.
-Passwords are stored in Key Vault. `./infra verify` checks DNS, TCP,
-authenticated queries, sample row counts, and the ingestion login over each
-configured path. This prepares the source; it creates no ingestion pipeline.
-
-The rest of this guide explains the components and equivalent manual steps
-for understanding the design and troubleshooting. The disconnected
-`workspace-sql-server-vm-lakeflow-cdc` template remains available to build
-the network paths yourself.
-
-## Manual UI guide
-
-This section explains the networking components and the UI steps required to
-connect Azure Databricks serverless compute to SQL Server in Azure without
-enabling public database access. Configuration is performed through the Azure
-portal, the Azure Databricks account console, and the Databricks workspace UI.
-
-## Guide scope
-
-This document assumes that the Azure SQL logical server or SQL Server VM
-already exists. It focuses on configuring and validating private connectivity;
-database deployment and schema management are outside its scope.
-
-Use these interfaces throughout the procedure:
-
-| Interface | What is configured there |
-|---|---|
-| **Azure portal** | Azure SQL networking, private endpoint approval, load balancer, Private Link Service, and Microsoft Entra administrator. |
-| **Databricks account console** | Network Connectivity Configuration, workspace attachment, and private endpoint rules. |
-| **Databricks workspace UI** | Unity Catalog connection, credentials, and connection test. |
-
-The text blocks in this guide show values to enter, resource-ID shapes, DNS
-names, or validation queries. They are not infrastructure deployment scripts.
-
-There are two distinct scenarios:
-
-1. **Azure SQL Database:** Databricks creates a private endpoint directly to
-   the Azure SQL logical server. This is the preferred and simpler design.
-2. **SQL Server on an Azure VM:** The VM must be exposed through an internal
-   Standard Load Balancer and an Azure Private Link Service.
+| Interface | What you configure there |
+| --- | --- |
+| Azure portal | Azure SQL networking and private endpoint approval |
+| Databricks account console | NCC, workspace attachment, and the private endpoint rule |
+| Databricks workspace UI | The Unity Catalog connection and the connection test |
 
 Official references:
 
 - [Configure private connectivity to Azure resources](https://learn.microsoft.com/azure/databricks/security/network/serverless-network-security/serverless-private-link)
-- [Configure private connectivity to resources in your VNet](https://learn.microsoft.com/azure/databricks/security/network/serverless-network-security/pl-to-internal-network)
 - [Manage private endpoint rules](https://learn.microsoft.com/azure/databricks/security/network/serverless-network-security/manage-private-endpoint-rules)
 
-## Understand the networking model
-
-Azure Databricks serverless compute runs in a Databricks-managed network. It
-does not run in the customer-managed VNet used by classic compute. VNet
-injection, VNet peering, private DNS zones, and private endpoints configured
-for classic compute therefore do not automatically give serverless compute a
-path to private Azure resources.
-
-Serverless private networking uses these components:
-
-| Component | Purpose |
-|---|---|
-| **Serverless compute plane** | Runs serverless notebooks, jobs, SQL warehouses, Lakeflow pipelines, and model-serving workloads in a Databricks-managed network. |
-| **Network Connectivity Configuration (NCC)** | Regional account object that defines private destinations available to serverless workloads. |
-| **Workspace-to-NCC binding** | Activates the NCC for serverless workloads in a workspace. A workspace can use only one NCC at a time. |
-| **Private endpoint rule** | Identifies the Azure resource and subresource that Databricks must reach privately. |
-| **Databricks-managed private endpoint** | Consumer-side Azure Private Link endpoint created by Databricks after the rule is added. |
-| **Azure resource approval** | Resource-owner approval that authorizes the Databricks private endpoint. |
-| **Azure SQL logical server** | Private Link provider for Azure SQL Database. It supports a direct endpoint with subresource `sqlServer`. |
-| **Azure Private Link Service** | Provider used for custom services, including SQL Server on a VM behind an internal Standard Load Balancer. |
-
-The NCC affects serverless compute only. Classic compute still uses its own
-VNet, routes, DNS, and private endpoints.
-
-## Choose the correct architecture
-
-### Azure SQL Database
+## How the path works
 
 ```text
 Azure Databricks workspace
-  -> workspace-to-NCC binding
-  -> NCC private endpoint rule
+  -> NCC attached to the workspace
+  -> private endpoint rule
        destination: Azure SQL logical server resource ID
        subresource: sqlServer
   -> Databricks-managed private endpoint
   -> Azure SQL logical server
-  -> Azure SQL database on TCP 1433
+  -> database on TCP 1433
 ```
 
-Azure SQL Database supports Private Link directly. Do not add an Azure Load
-Balancer or customer-managed Private Link Service for this scenario.
+Serverless compute runs in a Databricks-managed network, not in the VNet that
+classic compute uses. VNet injection, peering, private DNS zones, and private
+endpoints set up for classic compute therefore give serverless compute no path
+to a private resource.
 
-### SQL Server on an Azure VM
+| Component | Purpose |
+| --- | --- |
+| Network Connectivity Configuration (NCC) | Regional account object that lists the private destinations serverless compute may reach. A workspace uses one NCC at a time. |
+| Private endpoint rule | Names the Azure resource and subresource to reach privately. |
+| Databricks-managed private endpoint | The endpoint Databricks creates in its own network after you add the rule. |
+| Approval on the Azure resource | The resource owner's approval of that endpoint. Nothing flows until it is approved. |
 
-```text
-Azure Databricks workspace
-  -> workspace-to-NCC binding
-  -> NCC private endpoint rule
-       destination: Azure Private Link Service resource ID
-       domain: stable SQL Server application hostname
-  -> Databricks-managed private endpoint
-  -> Azure Private Link Service
-  -> internal Standard Load Balancer on TCP 1433
-  -> SQL Server VM private IP on TCP 1433
-```
-
-A VM does not expose the Azure SQL `sqlServer` subresource. The load balancer
-and Private Link Service provide the private service frontend that Databricks
-can consume.
+Azure SQL Database supports Private Link directly, with the subresource
+`sqlServer`. Do not add a load balancer or a Private Link service for it.
 
 ## Requirements and limits
 
-- Azure Databricks serverless compute must be available in the workspace.
-- You must be an Azure Databricks account administrator.
-- You need permission to inspect and approve private endpoint connections on
-  the Azure destination.
-- The NCC and workspace must be in the same Azure region.
-- A workspace can be attached to only one NCC. Add all required destination
-  rules to that NCC.
-- The database must listen on the configured TCP port and accept the selected
-  authentication method.
+- Premium plan, and a workspace with serverless compute.
+- Azure Databricks account admin.
+- Permission to approve private endpoint connections on the SQL logical
+  server.
+- The NCC and the workspace must be in the same Azure region.
+- A workspace uses one NCC. Add every destination it needs to that NCC.
 
-Current documented regional limits include:
-
-- Up to 10 NCCs per Databricks account and region.
-- Up to 100 private endpoints per region across those NCCs.
-- Up to 50 workspaces attached to one NCC.
+Limits: 20 NCCs for each account and region, 100 private endpoints for each
+region, and 50 workspaces for each NCC.
 
 ## Values to collect
 
-Before starting, record:
+| Value | Where to find it |
+| --- | --- |
+| Workspace name and region | Account console, **Workspaces** |
+| SQL logical server resource ID | Azure portal, **JSON View** on the server's **Overview** page |
+| SQL hostname | Server **Overview** page, normally `<server>.database.windows.net` |
+| Database name | Server **SQL databases** page |
+| Subresource | `sqlServer` |
 
-| Setting | Where to find it |
-|---|---|
-| Databricks account | Azure Databricks account console |
-| Workspace and workspace region | **Workspaces** in the account console |
-| Azure SQL logical server resource ID | Azure portal **JSON View** on the SQL server overview page |
-| Azure SQL hostname | SQL server **Overview** page; normally `<server>.database.windows.net` |
-| Database name | Azure SQL server **SQL databases** page |
-| Azure SQL subresource | `sqlServer` |
-| SQL Server VM application hostname | The stable hostname applications will use |
-| Private Link Service resource ID | Private Link Service **Overview > JSON View** |
-
-## Azure SQL Database procedure
+## Procedure
 
 ### 1. Prepare Azure SQL for private access
 
@@ -383,258 +237,6 @@ Successful authentication and query execution confirm:
 Test with a read-only query first. Add write permissions only when the workload
 requires them.
 
-## SQL Server on an Azure VM procedure
-
-### Values to collect before starting
-
-Record the values for the target environment before creating the load
-balancer. Values shown in angle brackets are placeholders and must not be
-entered literally.
-
-| Setting | Value |
-|---|---|
-| Resource group | `<sql-server-resource-group>` |
-| Region | `<sql-server-vm-region>` |
-| Virtual network | `<sql-server-vnet>` |
-| SQL VM subnet | `<sql-server-vm-subnet>` |
-| SQL Server VM | `<sql-server-vm-name>` |
-| SQL Server NIC | `<sql-server-vm-nic>` |
-| SQL Server private IP | `<sql-server-private-ip>` |
-| SQL Server port | `1433` |
-| Unused IP in the SQL VM subnet | `<load-balancer-private-frontend-ip>` |
-| Private Link Service NAT subnet | `<private-link-service-nat-subnet>` |
-| Unused IP in the NAT subnet | `<private-link-service-nat-ip>` |
-| Stable SQL application hostname | `<sql-server-application-hostname>` |
-| Databricks endpoint subscription | `<databricks-private-endpoint-subscription-id>` |
-
-Find the VM, NIC, VNet, subnet, private IP, resource group, and region on the
-VM's **Overview** and **Networking** pages. Check the subnet address ranges
-before selecting unused frontend and NAT IP addresses; do not guess them or
-reuse the VM's IP.
-
-The VM should have no public IP. Its network security group and Windows
-firewall must permit TCP `1433` from the Private Link Service NAT subnet and
-permit Azure Load Balancer health probes. Deny other inbound traffic unless a
-separate approved management path requires it.
-
-### 1. Prepare SQL Server and the VM network
-
-1. Confirm SQL Server listens on a fixed TCP port, normally `1433`.
-2. Confirm the service listens on the VM's private interface.
-3. Disable public IP access when it is not explicitly required for another
-   controlled use case.
-4. In the VM network security group, do not allow Internet-sourced access to
-   TCP `1433`.
-5. Create or choose a dedicated subnet for the Private Link Service NAT IPs.
-
-### 2. Create an internal Standard Load Balancer
-
-In the Azure portal, go to **Load balancers > Create** and complete each tab as
-follows.
-
-#### Basics tab
-
-1. Select the subscription containing the SQL Server VM.
-2. Select `<sql-server-resource-group>`.
-3. Enter a descriptive name such as `internal-sql-lb`.
-4. Select `<sql-server-vm-region>`. The load balancer and VM must be in the
-   same region.
-5. Select **Standard** as the SKU.
-6. Select **Internal** as the type.
-7. Select **Regional** as the tier if the portal displays that option.
-8. Do not select **Gateway Load Balancer**. It is intended for inserting
-   network virtual appliances, not for balancing SQL traffic.
-
-#### Frontend IP configuration tab
-
-1. Click **Add a frontend IP configuration**.
-2. Enter `sql-frontend` as the name.
-3. Select **IPv4**.
-4. Select `<sql-server-vnet>`.
-5. After selecting the virtual network, select `<sql-server-vm-subnet>`.
-6. Select **Static** IP assignment.
-7. Enter `<load-balancer-private-frontend-ip>`, an unused address inside the
-   selected subnet.
-8. Select **Zone-redundant** where supported unless the workload has a
-   deliberate zonal design that requires a specific zone.
-9. Save the frontend configuration.
-
-The subnet and private-IP fields appear only after the virtual network has
-been selected. The frontend must be private; do not create or select a public
-IP address.
-
-#### Backend pools tab
-
-1. Click **Add a backend pool**.
-2. Enter `sql-backend` as the name.
-3. Select `<sql-server-vnet>`.
-4. For backend-pool configuration, select **NIC** if the portal asks whether
-   to use NICs or IP addresses.
-5. Click **Add**, select `<sql-server-vm-name>`, and select its primary IP
-   configuration on `<sql-server-vm-nic>`.
-6. Confirm that `<sql-server-private-ip>` is shown and save the backend pool.
-
-Do not enter the load-balancer frontend IP as a backend. The backend is the
-SQL Server VM NIC at `<sql-server-private-ip>`.
-
-#### Inbound rules tab
-
-Add one load-balancing rule. When the rule asks for a health probe, select
-**Create new** and configure the probe first:
-
-| Health-probe setting | Value |
-|---|---|
-| Name | `sql-tcp-1433` |
-| Protocol | `TCP` |
-| Port | `1433` |
-| Interval | `5` seconds |
-| Unhealthy threshold | `2` consecutive failures |
-
-Configure the load-balancing rule with these values:
-
-| Load-balancing rule setting | Value |
-|---|---|
-| Name | `sql-tcp-1433` |
-| IP version | `IPv4` |
-| Frontend IP address | `sql-frontend` |
-| Backend pool | `sql-backend` |
-| Protocol | `TCP` |
-| Frontend port | `1433` |
-| Backend port | `1433` |
-| Health probe | `sql-tcp-1433` |
-| Session persistence | `None` |
-| Floating IP | `Disabled` |
-| TCP reset | `Disabled` |
-| Outbound SNAT | Disable when the backend subnet already has an approved explicit outbound path |
-
-If the backend subnet uses a NAT gateway, Azure Firewall, or another explicit
-egress design, disable implicit outbound SNAT on the load-balancing rule. If
-the VM still requires outbound access and no path exists, design an approved
-outbound rule or NAT gateway rather than accepting an accidental default.
-
-Do not add an inbound NAT rule. RDP is intentionally not exposed through the
-load balancer.
-
-#### Outbound rules, tags, and creation
-
-1. If the VM subnet already has approved explicit outbound connectivity, do
-   not add an outbound rule. Otherwise configure the organization's required
-   outbound design.
-2. Add organizational tags if required.
-3. Open **Review + create** and confirm:
-   - SKU is **Standard**.
-   - Type is **Internal**.
-   - Frontend IP is `<load-balancer-private-frontend-ip>` on
-     `<sql-server-vm-subnet>`.
-   - No public IP is present.
-4. Select **Create**.
-
-#### Validate the load balancer
-
-1. Open the new internal load balancer after deployment finishes.
-2. Confirm the frontend private IP is
-   `<load-balancer-private-frontend-ip>`.
-3. Open **Backend pools** and confirm `sql-backend` contains the VM NIC.
-4. Open **Load balancing rules** and confirm TCP `1433` maps to TCP `1433`.
-5. Open **Backend health** and confirm the VM reports **Healthy**.
-
-If the backend is unhealthy, confirm SQL Server is running and listening on
-TCP `1433`, the Windows firewall permits `1433`, and the VM network security
-group permits the `AzureLoadBalancer` service tag to reach that port.
-
-The load balancer supplies a stable frontend and health-aware routing. It does
-not make the database public because its frontend is internal.
-
-### 3. Create the Azure Private Link Service
-
-Create the Private Link Service only after the load-balancer backend reports
-healthy.
-
-#### Basics tab
-
-1. Go to **Private Link services > Create**.
-2. Select `<sql-server-resource-group>`.
-3. Enter a descriptive name such as `sql-private-link-service`.
-4. Select `<sql-server-vm-region>`.
-
-#### Outbound settings tab
-
-1. Select the internal Standard Load Balancer created in the previous step.
-2. Select frontend IP configuration `sql-frontend`.
-3. Select `<sql-server-vnet>`.
-4. Select source NAT subnet `<private-link-service-nat-subnet>`.
-5. Select **IPv4**.
-6. Select **Static** assignment and enter
-   `<private-link-service-nat-ip>` if a fixed NAT address is required. Dynamic
-   assignment is also supported when a stable NAT IP is not required by the
-   security policy.
-7. Keep **TCP proxy V2** disabled. SQL Server does not expect the proxy
-   protocol header.
-
-The source NAT subnet is different from the load-balancer frontend subnet.
-Use `<private-link-service-nat-subnet>`, not `<sql-server-vm-subnet>`, for the
-Private Link Service NAT IP.
-
-#### Access security tab
-
-1. Restrict visibility to approved subscriptions.
-2. Add the Databricks-managed private-endpoint subscription ID:
-
-   ```text
-   <databricks-private-endpoint-subscription-id>
-   ```
-
-   Obtain this account- and region-specific value from the approved
-   Databricks deployment information or your Databricks representative. Do
-   not reuse an ID copied from another account or region.
-
-3. Leave auto-approval disabled so the Databricks endpoint request must be
-   reviewed and approved manually.
-4. Review and create the service.
-
-After creation:
-
-1. Open the new Private Link Service.
-2. Confirm its provisioning state is **Succeeded**.
-3. Open **Overview > JSON View** and copy the full resource ID.
-4. Keep the **Private endpoint connections** page open; the Databricks request
-   will appear there after the NCC rule is created.
-
-### 4. Add the VM service to the NCC
-
-1. Open the Azure Databricks account console.
-2. Go to **Security > Network connectivity configurations**.
-3. Open the NCC already attached to the workspace.
-4. Select **Private endpoint rules** and click
-   **Add private endpoint rule**.
-5. Use the Azure Private Link Service resource ID as the destination.
-6. Add `<sql-server-application-hostname>`, the stable hostname that
-   applications will use. For example:
-
-   ```text
-   sqlvm.internal.example.com
-   ```
-
-7. Create the rule and wait for `PENDING`.
-
-For a customer-managed Private Link Service, the hostname identifies which
-serverless traffic must use the private route. It must exactly match the
-hostname in the SQL Server connection settings.
-
-### 5. Approve and validate the VM endpoint
-
-1. In the Azure portal, open the Private Link Service.
-2. Select **Private endpoint connections**.
-3. Approve the Databricks-created pending request.
-4. Return to the NCC and wait for `ESTABLISHED`.
-5. Restart running serverless resources.
-6. Create a SQL Server connection using
-   `<sql-server-application-hostname>` and port `1433`.
-7. Run an authenticated query from serverless compute.
-
-If the load balancer target is unhealthy, troubleshoot that path before the
-NCC. Private Link cannot deliver usable connections to an unhealthy backend.
-
 ## Security and DNS principles
 
 ### Keep public access disabled
@@ -645,8 +247,7 @@ detailed error first.
 
 ### Use the correct hostname
 
-- Azure SQL Database: use `<server>.database.windows.net`.
-- SQL Server VM: use the exact stable hostname listed in the NCC rule.
+Use `<server>.database.windows.net`, the server's normal hostname.
 
 Changing the hostname can bypass the intended rule or fail certificate
 validation.
@@ -656,7 +257,7 @@ validation.
 These error types indicate different layers:
 
 - Timeout, name-resolution failure, or connection refusal: investigate DNS,
-  NCC binding, rule state, endpoint approval, load balancer health, and NSGs.
+  NCC binding, rule state, and endpoint approval.
 - `Login failed for user`: the network path reached SQL Server; investigate
   username whitespace, password, database, authentication method, and grants.
 - Certificate or hostname error: verify the normal application hostname,
@@ -676,10 +277,6 @@ For classic compute to reach Azure SQL Database privately, create a private
 endpoint reachable from the classic-compute VNet and configure the
 `privatelink.database.windows.net` private DNS zone for that VNet.
 
-For classic compute to reach a SQL Server VM, provide routed connectivity such
-as VNet peering, Virtual WAN, VPN, or ExpressRoute, together with appropriate
-routes, DNS, and NSG rules.
-
 ## Troubleshooting checklist
 
 ### The NCC is not available on the workspace
@@ -690,8 +287,7 @@ routes, DNS, and NSG rules.
 
 ### The rule remains PENDING
 
-- Approve the Databricks-created endpoint on the Azure SQL logical server or
-  Private Link Service.
+- Approve the Databricks-created endpoint on the Azure SQL logical server.
 - Confirm that the approved request is the new Databricks endpoint rather than
   an unrelated customer-VNet endpoint.
 
@@ -700,7 +296,6 @@ routes, DNS, and NSG rules.
 - Restart the serverless resource.
 - Confirm the connection hostname and port.
 - Confirm the database name and credentials.
-- For a VM, confirm load balancer health and VM NSG rules.
 - Verify that the database accepts the selected authentication method.
 
 ### The error recommends allowing public Internet access

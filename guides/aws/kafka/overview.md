@@ -1,105 +1,168 @@
-# Stream synthetic Kafka events from Databricks
+# Manually connect Databricks compute to a private Kafka broker on AWS
 
-The Kafka feature creates a disposable, single-broker Apache Kafka lab in a
-dedicated AWS VPC. It is intended for connectivity and Structured Streaming
-exercises, not production workloads.
+This guide explains how to reach a self-managed Apache Kafka broker in a
+private VPC from Databricks classic and serverless compute. Kafka needs more
+care than a database, because a client connects twice and the second address
+comes from the broker.
 
-The broker runs in KRaft combined broker/controller mode on a private EC2
-instance. A systemd service continuously sends one synthetic purchase event to
-the `demo-events` topic every second by default. Kafka retains the events for 24
-hours.
+It covers the network path and the broker's listener settings. It assumes a
+broker on an EC2 instance with no public IP, in a VPC you control.
+
+## Why Kafka is different
+
+A Kafka client connects in two steps:
+
+1. It contacts the **bootstrap address** you configure and asks for cluster
+   metadata.
+2. The broker answers with its **advertised listener** address. The client
+   drops the first connection and connects to that address for all data.
+
+So the network path is not enough. The address the broker advertises must be
+one the client can reach over that path. A broker that advertises its private
+IP works over peering but not over PrivateLink, where the client can only
+reach the endpoint.
+
+The fix is one listener for each path, each on its own port and each
+advertising the right address:
+
+| Path | Listener port | Address the broker advertises |
+| --- | --- | --- |
+| Classic compute over VPC peering | `9092` | The broker's private IP |
+| Classic or serverless compute over PrivateLink | `9094` | The Network Load Balancer's DNS name |
+
+Example broker settings, with `SASL_PLAINTEXT` on both listeners:
 
 ```text
-Synthetic producer -> Kafka topic -> Databricks Structured Streaming -> Delta
+listeners=INTERNAL://:9092,PRIVATELINK://:9094
+advertised.listeners=INTERNAL://<broker-private-ip>:9092,PRIVATELINK://<nlb-dns-name>:9094
+listener.security.protocol.map=INTERNAL:SASL_PLAINTEXT,PRIVATELINK:SASL_PLAINTEXT
 ```
 
-The producer runs on the broker host, so data begins entering Kafka after the
-instance finishes bootstrapping. Databricks is a Kafka consumer: it pulls the
-events rather than receiving a push from the broker.
+A client receives the advertised address of the listener it connected to, so
+each path stays on its own port from start to finish.
 
-## Connectivity
+With several brokers, PrivateLink needs a way to reach each one separately:
+one load balancer listener port for each broker, or one load balancer for each
+broker. A managed service such as Amazon MSK handles this with its own
+multi-VPC connectivity.
 
-Kafka clients first contact a bootstrap address and then use the broker address
-returned in Kafka metadata. This module has distinct advertised listeners so
-both paths return an address that the client can actually reach:
+## Requirements
 
-| Compute path | Listener | Network path |
-| --- | --- | --- |
-| Classic `peering` | Broker private IP on `9092` | Workspace VPC peering and routes |
-| Classic `private_link` | NLB hostname on `9094` | Workspace interface endpoint and private Route 53 alias |
-| Serverless `private_link` | NLB hostname on `9094` | NCC-managed interface endpoint |
+- A workspace with classic compute in a VPC you manage, serverless compute, or
+  both.
+- A Kafka broker in a private subnet, and permission to change its listener
+  settings and restart it.
+- For serverless compute: Databricks account admin, to manage the NCC.
+- Permission to create load balancers, endpoint services, and endpoints, and
+  to edit route tables and security groups.
 
-The classic and serverless PrivateLink consumers share the same internal NLB
-and endpoint service, which requires acceptance. Terraform accepts the classic
-endpoint it creates in the same account; the serverless NCC connection must be
-reviewed and accepted explicitly.
+## Path A: classic compute over VPC peering
 
-## Deploy the example
+1. Peer the workspace VPC with the Kafka VPC and add routes in both
+   directions. The steps are the same as in
+   [VPC peering](../classic/aurora-postgres/vpc-peering.md).
+2. On the broker's security group, allow inbound TCP `9092` from the workspace
+   private subnets.
+3. Make sure the `INTERNAL` listener advertises the broker's private IP.
+4. Use `<broker-private-ip>:9092` as the bootstrap address.
 
-Copy the example into the ignored local environment directory, then let
-`./infra` select and verify the AWS and Databricks profiles:
+## Path B: PrivateLink for classic and serverless compute
 
-```bash
-cp environments/examples/aws/workspace-kafka-streaming.tfvars \
-  environments/local/my-kafka.tfvars
+Both compute types can share one load balancer and one endpoint service.
 
-./infra setup aws environments/local/my-kafka.tfvars --yes
-./infra validate aws
-./infra plan aws environments/local/my-kafka.tfvars
-# Review and authorize the saved plan before applying it.
-./infra apply aws environments/local/my-kafka.tfvars
-```
+### 1. Create the load balancer
 
-The example uses classic VPC peering and serverless PrivateLink. After apply,
-inspect the output and approve the expected serverless endpoint connection:
+1. Create a target group: type **IP addresses**, protocol **TCP**, port
+   `9094`, in the Kafka VPC. Register the broker's private IP.
+2. Create an internal **Network Load Balancer** in the broker's subnets, with
+   a **TCP** listener on `9094` that forwards to the target group.
+3. Give the load balancer a security group, and allow inbound TCP `9094` on
+   the broker's security group from that group.
+4. Copy the load balancer's DNS name.
 
-```bash
-./infra output aws environments/local/my-kafka.tfvars
-./infra endpoints aws status environments/local/my-kafka.tfvars
-```
+### 2. Advertise the load balancer name
 
-Endpoint acceptance is an external state change. Follow the reviewed-ID
-workflow in the [AWS connectivity guide](../connectivity.md).
+Set the `PRIVATELINK` listener to advertise `<nlb-dns-name>:9094` and restart
+the broker. Wait until the target group shows the broker as healthy.
 
-## Credentials
+### 3. Publish the endpoint service
 
-The generated SASL/PLAIN username and password are stored in AWS Secrets
-Manager. Terraform outputs only the secret ARN. Copy the two values into a
-Databricks secret scope as keys named `username` and `password`; do not place
-them directly in a notebook or commit them to Git.
+1. Open **VPC > Endpoint services** and select **Create endpoint service**.
+2. Select the load balancer and keep **Acceptance required** enabled.
+3. Copy the service name (`com.amazonaws.vpce.<region>.vpce-svc-...`).
 
-SASL/PLAIN authenticates the lab client but does not encrypt Kafka payloads.
-The traffic remains on the selected private network path. Production designs
-should use TLS (`SASL_SSL`) and a multi-broker managed service such as Amazon
-MSK.
+### 4. Connect classic compute
 
-## Stream from Databricks
+1. Open **VPC > Endpoints**, select **Create endpoint**, and choose
+   **Endpoint services that use NLBs and GWLBs**. Enter the service name.
+2. Select the workspace VPC and its private subnets, and a security group that
+   allows inbound TCP `9094` from the cluster security group.
+3. Accept the connection on the endpoint service.
+4. Make the advertised name resolve to the endpoint inside the workspace VPC:
+   create a Route 53 **private hosted zone** for the load balancer's DNS name,
+   associate it with the workspace VPC, and add an **alias** A record that
+   points to the interface endpoint.
 
-Import `modules/aws/kafka/notebooks/stream_from_kafka.py` into the workspace.
-Set its `bootstrap_servers` widget from the matching `connectivity.kafka`
-output:
+Step 4 is what makes the second connection work. The broker advertises the
+load balancer name, and from the workspace VPC that name must lead to the
+endpoint, not to the load balancer's unreachable private addresses.
 
-- classic peering: `<classic.host>:9092`;
-- classic PrivateLink: `<classic.host>:9094`;
-- serverless PrivateLink: `<serverless.host>:9094`.
+### 5. Connect serverless compute
 
-The notebook reads the live events with Spark Structured Streaming. To persist
-them, replace its final `display(events)` with a checkpointed Delta sink:
+1. In the Databricks account console, open **Security > Network connectivity
+   configurations** and open or create the NCC for the workspace's region.
+2. Add a private endpoint rule with the endpoint service name, and enter the
+   load balancer's DNS name as the domain name. Databricks routes that name to
+   its endpoint, which covers the advertised address too.
+3. Accept the new connection on the endpoint service, after checking that its
+   endpoint ID matches the one on the rule.
+4. Wait for the rule to show `ESTABLISHED`, and attach the NCC to the
+   workspace if it is not attached yet.
+
+The account console steps are the same as in the
+[RDS SQL Server guide](../serverless/rds-sql-server/private-link.md).
+
+Use `<nlb-dns-name>:9094` as the bootstrap address from both compute types.
+
+## Test with Structured Streaming
+
+Store the Kafka username and password in a Databricks secret scope, then run
+this on the compute type you are testing:
 
 ```python
-(
-    events.writeStream
-    .option("checkpointLocation", "/Volumes/main/default/checkpoints/kafka")
-    .toTable("main.default.kafka_events")
+username = dbutils.secrets.get("<scope>", "username")
+password = dbutils.secrets.get("<scope>", "password")
+jaas = (
+    "org.apache.kafka.common.security.plain.PlainLoginModule required "
+    f'username="{username}" password="{password}";'
 )
+
+events = (
+    spark.readStream.format("kafka")
+    .option("kafka.bootstrap.servers", "<bootstrap-address>")
+    .option("subscribe", "<topic>")
+    .option("startingOffsets", "latest")
+    .option("kafka.security.protocol", "SASL_PLAINTEXT")
+    .option("kafka.sasl.mechanism", "PLAIN")
+    .option("kafka.sasl.jaas.config", jaas)
+    .load()
+    .selectExpr("CAST(value AS STRING) AS value", "timestamp", "partition", "offset")
+)
+
+display(events)
 ```
 
-Use a different checkpoint for each independent consumer.
+`SASL_PLAINTEXT` authenticates the client but does not encrypt the traffic.
+Use TLS (`SASL_SSL`) for anything beyond a test, with a certificate that
+matches the advertised name.
 
-## Operational notes
+## Troubleshooting
 
-- The EC2 instance has no public IP and is managed through Systems Manager.
-- A NAT gateway is used for Docker image installation and is billable.
-- This is a single point of failure with replication factor `1`.
-- The synthetic producer restarts automatically with systemd.
-- Destroy the lab when finished to stop EC2, NAT gateway, and NLB charges.
+| Symptom | Likely cause and fix |
+| --- | --- |
+| The stream starts, then times out fetching metadata or data | The bootstrap connection worked, but the advertised address is not reachable on this path. Check which listener the port belongs to and what it advertises. |
+| It works over peering but not over PrivateLink | The client used port `9092`, or the `PRIVATELINK` listener advertises the private IP. |
+| Classic compute cannot resolve the load balancer name to the endpoint | The private hosted zone is missing, or not associated with the workspace VPC. |
+| The NCC rule stays pending | The connection has not been accepted on the endpoint service. |
+| The target group shows the broker as unhealthy | The broker is not listening on `9094`, or its security group does not allow the load balancer. |
+| Authentication fails | The path works. Check the SASL mechanism and the credentials. |

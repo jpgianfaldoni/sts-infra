@@ -32,7 +32,7 @@ for each question:
 | Account | No target fits, or several do | Run `./infra targets` and offer the matching ones by name and description. |
 | Cloud | Not stated | No default: ask. |
 | Compute | "Databricks can reach X" without classic or serverless | Ask; explain that classic compute runs in the customer network and serverless compute runs in Databricks' account and needs Private Link. |
-| "Privately" | The path is not named | Classic: VPC/VNet peering (simplest). Serverless: Private Link (the only private option). Mention AWS classic PrivateLink when the user wants to practice endpoint services. |
+| "Privately" | The path is not named | Classic: VPC/VNet peering (simplest). Serverless: Private Link (the default; on AWS the only private option). Mention AWS classic PrivateLink when the user wants to practice endpoint services, and the Azure private network gateway when the user asks for it or wants serverless compute to reuse the VNet path. |
 | Sample data | Not mentioned | Load it: `./infra verify` seeds `customers` and `orders` into every database source with a path (PostgreSQL, SQL Server, MySQL, Oracle); the database VMs load it during apply. |
 | Region | Not stated | The target's region, else `us-west-2` (AWS) or `westus2` (Azure). |
 
@@ -47,6 +47,14 @@ Clarify these phrasings instead of guessing:
   VNet as a simulation; `workspace-sql-server-vm-private-link` connects it to
   classic compute through peering and serverless compute through Private Link.
   This creates no VPN or ExpressRoute connection to an actual external site.
+- "Private network gateway" or "PNG": Azure only, and serverless compute only
+  (Public Preview, billed by bandwidth tier). Set
+  `connectivity.<source>.serverless = "private_network_gateway"` on
+  `sql_server_vm`, `sql_database`, or `mysql_flexible_server`, together with
+  the source's `workspace_peering_enabled = true`. Say that classic compute
+  does not use the gateway: it already runs in the workspace VNet and reaches
+  the source through the same peering. The gateway has no endpoint to approve.
+  See `guides/operations/lab-scenarios.md#private-network-gateway`.
 - MySQL: RDS for MySQL (`rds_mysql`) on AWS; Azure Database for MySQL Flexible
   Server (`mysql_flexible_server`) or MySQL on a VM (`mysql_vm`) on Azure.
 - Oracle: RDS for Oracle (`rds_oracle`, non-multitenant Standard Edition 2) on
@@ -201,6 +209,8 @@ recreating other resources. See [cleanup recovery](guides/operations/deployment.
 | `doctor` exit 11 on `metastore`, status `choice_required` | `metastore_mode = "auto"` found several metastores in the region. Ask the user which to use (offer `suggested`); set `unity_catalog.metastore_mode = "existing"` and `existing_metastore_name`, and offer to save it in the target with `--metastore`. |
 | `doctor` exit 11 on `metastore`, status `not_found` | `existing_metastore_name` does not exist or is in another region; see `detail`. |
 | `verify` fails at `dns` or `tcp` on serverless | The endpoint rule may still be provisioning: check `./infra endpoints <cloud> status`, wait a few minutes, rerun `verify`. |
+| `verify` fails at `dns` or `tcp` on serverless over `private_network_gateway` | No endpoint rule is involved. Check that the gateway in the `serverless_connectivity` output is `ESTABLISHED`, that the source's `workspace_peering_enabled` is true, and wait a few minutes after a new gateway or destination; then rerun `verify`. |
+| Apply fails creating the private network gateway | The preview is not enabled for the account, the region is unsupported, or the NCC already holds two gateways. A `FAILED` gateway is terminal: fix the cause, then plan and apply to replace it. |
 | `verify` fails at `dns` or `tcp` on classic | The path is broken or deliberately absent; compare with `./infra explain`. |
 | `verify` fails at `driver` | "could not install": the compute has no outbound internet access to PyPI. "Unexpected error": the pinned driver set in `modules/shared/lab-check/notebooks/lab_check.py` is incompatible; the hint lists the installed versions, and `python3 tests/test_lab_check_drivers.py` reproduces it locally. |
 | `verify` fails at `login` or `credentials` | Rerun `verify` (it refreshes the credentials); on Azure, check the Key Vault-backed scope. |

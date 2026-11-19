@@ -38,6 +38,7 @@ offer the closest scenario.
 | Azure Oracle VM ready for Lakeflow Connect, no path | `azure/workspace-oracle-vm-lakeflow-cdc` |
 | Azure SQL Server VM ready for Lakeflow Connect, no path | `azure/workspace-sql-server-vm-lakeflow-cdc` |
 | Azure SQL Server VM ready for CDC, reached from classic and serverless | `azure/workspace-sql-server-vm-private-link` |
+| Azure SQL Server VM reached from classic (peering) and serverless through a private network gateway (PNG) | `azure/workspace-sql-server-vm-private-network-gateway` |
 
 If no target exists for the account, ask for the non-secret identifiers
 (account IDs, region, and for AWS SSO the start URL, SSO region, and role

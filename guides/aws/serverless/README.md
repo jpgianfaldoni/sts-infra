@@ -1,17 +1,10 @@
 # AWS serverless compute guides
 
-## RabbitMQ
+Serverless compute runs in a Databricks-managed network. Each guide publishes
+a private service through a Network Load Balancer and an endpoint service, and
+connects it with a Network Connectivity Configuration (NCC).
 
-- [Overview](rabbitmq/overview.md)
-- [NCC and PrivateLink tutorial](rabbitmq/private-link.md)
-
-## Kafka
-
-- [Streaming lab with NCC PrivateLink](../kafka/overview.md)
-
-## RDS SQL Server
-
-- [NCC and PrivateLink tutorial](rds-sql-server/private-link.md)
-
-The SQL Server tutorial also explains how to adapt the NLB and NCC path for
-RDS PostgreSQL on TCP port `5432`.
+- [RDS SQL Server](rds-sql-server/private-link.md). The guide also explains
+  how to adapt the path for RDS PostgreSQL on TCP `5432`.
+- [RabbitMQ on EC2](rabbitmq/private-link.md)
+- [Kafka](../kafka/overview.md)

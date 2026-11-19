@@ -77,6 +77,35 @@ class AzureSqlVmScenario(unittest.TestCase):
         self.assertTrue({"ncc", "vnet_peering", "private_link_service", "lab_check"} <= {c["name"] for c in report["components"]})
 
 
+    def test_azure_private_network_gateway_serves_serverless_over_the_peering(self):
+        config = azure_config(
+            features={"sql_database": False, "sql_server_vm": True},
+            connectivity={"sql_database": {"serverless": "none"}, "sql_server_vm": {"serverless": "private_network_gateway"}},
+            sql_server_vm={"workspace_peering_enabled": True, "private_dns_name": "sqlserver.lab.exampledomain.com"},
+        )
+        report = scenario.analyze("azure", config, MANIFEST)
+        self.assertEqual(levels(report, "error"), [])
+        self.assertEqual({(p["compute"], p["mode"]) for p in report["paths"]}, {("classic", "peering"), ("serverless", "private_network_gateway")})
+        names = {c["name"] for c in report["components"]}
+        self.assertTrue({"ncc", "vnet_peering", "private_network_gateway", "lab_check"} <= names)
+        self.assertNotIn("private_link_service", names)
+        # No private endpoint rule exists, so there is nothing to approve.
+        self.assertIsNone(report["endpoint_approval"])
+        self.assertTrue(any("serverless compute only" in message for message in levels(report, "info")))
+
+    def test_azure_private_network_gateway_needs_peering_hostname_and_region(self):
+        config = azure_config(
+            location="norwayeast",
+            features={"sql_database": False, "sql_server_vm": True},
+            connectivity={"sql_database": {"serverless": "none"}, "sql_server_vm": {"serverless": "private_network_gateway"}},
+        )
+        report = scenario.analyze("azure", config, MANIFEST)
+        errors = levels(report, "error")
+        self.assertTrue(any("sql_server_vm.workspace_peering_enabled = true" in message for message in errors))
+        self.assertTrue(any("private_dns_name is required" in message for message in errors))
+        self.assertTrue(any("norwayeast" in message for message in levels(report, "warning")))
+
+
 class TfvarsParsing(unittest.TestCase):
     def test_top_level_assignments_ignore_comments_and_nested_keys(self):
         with tempfile.TemporaryDirectory() as directory:

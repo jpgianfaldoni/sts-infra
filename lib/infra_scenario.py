@@ -35,6 +35,14 @@ TARGET_TERRAFORM_FIELDS = {
 }
 # Sources whose lab check loads sample data; the others only connect.
 SEEDED_SOURCES = {"aws": {"rds_postgres", "rds_sql_server", "rds_mysql", "rds_oracle"}, "azure": {"sql_database", "mysql_flexible_server", "sql_server_vm"}}
+# Regions of the Azure Databricks private network gateway Public Preview;
+# deployments/azure/checks.tf warns with the same list.
+PNG_REGIONS = {
+    "australiaeast", "brazilsouth", "canadacentral", "centralindia", "centralus", "eastasia", "eastus", "eastus2",
+    "francecentral", "germanywestcentral", "japaneast", "koreacentral", "northcentralus", "northeurope",
+    "southcentralus", "southeastasia", "swedencentral", "switzerlandnorth", "uaenorth", "uksouth", "westcentralus",
+    "westeurope", "westus", "westus2", "westus3",
+}
 # Sources the lab check job prepares for Lakeflow Connect: (option default,
 # change capture method). Defaults match deployments/<cloud>/variables.tf.
 LAKEFLOW_SOURCES = {
@@ -581,7 +589,16 @@ def derived_components(cloud, config, paths):
             derived.add("vnet_peering")
         if active.get(("sql_server_vm", "serverless")) == "private_link":
             derived.add("private_link_service")
-    if enabled(config, "workspace") and any(mode == "private_link" for (_, compute), mode in active.items() if compute == "serverless"):
+        if enabled(config, "workspace") and any(mode == "private_network_gateway" for (_, compute), mode in active.items() if compute == "serverless"):
+            derived.add("private_network_gateway")
+    # Private endpoint rules and the private network gateway live on one NCC.
+    # In manual mode the user creates the NCC and the gateway.
+    if config.get("private_network_gateway", {}).get("manual"):
+        derived.discard("private_network_gateway")
+    if enabled(config, "workspace") and (
+        "private_network_gateway" in derived
+        or any(mode == "private_link" for (_, compute), mode in active.items() if compute == "serverless")
+    ):
         derived.add("ncc")
     if enabled(config, "workspace") and config.get("lab_check", {}).get("enabled", True) and any(
         mode != "none" for mode in active.values()
@@ -636,6 +653,27 @@ def analyze(cloud, config, manifest, explicit=None, target_name=None, target=Non
         test_vm = config.get("test_vm", {})
         if enabled(config, "test_vm") and test_vm.get("allowed_ssh_source_cidr") in (None, "203.0.113.10/32"):
             finding("error", "test_vm.allowed_ssh_source_cidr must be your public IPv4 address as a /32 (the template value is a documentation address).")
+        for path in paths:
+            if path["compute"] != "serverless" or path["mode"] != "private_network_gateway":
+                continue
+            source = path["source"]
+            option = components[source].get("classic_path_option")
+            if option and not config.get(source, {}).get(option):
+                finding("error", f"connectivity.{source}.serverless = \"private_network_gateway\" needs {source}.{option} = true: "
+                                 "the gateway brings serverless compute into the workspace VNet, and the peering carries it to the source.")
+            if source == "sql_server_vm" and not config.get(source, {}).get("private_dns_name"):
+                finding("error", "sql_server_vm.private_dns_name is required for the private network gateway, which routes by DNS name.")
+        if config.get("private_network_gateway", {}).get("manual") and any(
+            path["compute"] == "serverless" and path["mode"] == "private_network_gateway" for path in paths
+        ):
+            finding("info", "private_network_gateway.manual = true: Terraform creates only the delegated gateway subnet and the source "
+                            "firewall rule. Create the NCC, attach it to the workspace, and create the gateway yourself; "
+                            "./infra verify fails on the serverless path until you do.")
+        if "private_network_gateway" in derived:
+            finding("info", "The private network gateway is in Public Preview and serves serverless compute only; classic compute "
+                            "already runs in the workspace VNet and uses the same peering. Databricks bills the gateway by bandwidth tier.")
+            if PNG_REGIONS and str(config.get("location", "westus2")).lower().replace(" ", "") not in PNG_REGIONS:
+                finding("warning", f"The private network gateway preview does not list {config.get('location')} as a supported region; choose another location.")
         if enabled(config, "sql_database") and "lab_check" in derived and "key_vault" not in derived:
             finding("info", "Without the Key Vault-backed secret scope, the Azure SQL check only tests TCP reachability and loads no sample data.")
     if cloud == "aws" and config.get("glue_federation", {}).get("databricks_connectivity_enabled") and not enabled(config, "unity_catalog"):
@@ -686,7 +724,8 @@ def analyze(cloud, config, manifest, explicit=None, target_name=None, target=Non
         "paths": [dict(path, description=modes.get(path["mode"], "")) for path in paths],
         "checks": checks,
         "stages": stages,
-        "endpoint_approval": config.get("endpoint_approval", "auto") if "ncc" in derived else None,
+        "endpoint_approval": config.get("endpoint_approval", "auto")
+        if any(path["compute"] == "serverless" and path["mode"] == "private_link" for path in paths) and "ncc" in derived else None,
         "estimate": {"minutes": minutes, "cost": cost},
         "findings": findings,
     }

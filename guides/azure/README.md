@@ -1,10 +1,28 @@
-# Azure tutorials
+# Azure guides
 
-- [Workspace front-end Private Link lab](front-end-private-link.md), with a test VM and the `databricks_ui_api` and `browser_authentication` endpoints.
-- [Serverless tutorials](serverless/README.md), organized by data source. Serverless Private Link to Azure SQL Database is automated with `connectivity.sql_database.serverless = "private_link"` (NCC, workspace binding, and private endpoint rule); approve the endpoint with `./infra endpoints azure approve`.
-- [Azure SQL Database notes](serverless/sql-database/overview.md): credentials in Key Vault, a Key Vault-backed Databricks secret scope, the Microsoft Entra administrator, and optional VNet peering for classic compute and the test VM.
-- [SQL Server VM private connectivity](serverless/sql-database/private-link.md#automated-path-for-sql-server-on-a-vm): `workspace-sql-server-vm-private-link` creates a separate database VNet, classic peering, serverless Private Link through an internal load balancer, and Lakeflow Connect CDC source setup. The disconnected VM template remains available for the manual UI exercise.
-- The `databricks-workspace` module creates a VNet-injected workspace with a `databricks_ui_api` private endpoint.
-- The `external-volume-storage` module can create, reuse (`metastore_mode = "existing"`), or automatically choose (`metastore_mode = "auto"`) a Unity Catalog metastore and expose locked-down ADLS as an external volume. Auto mode keeps the metastore it manages, reuses the only other metastore in the region, creates one when there is none, and fails the plan when several exist. Without a storage Private Link/NCC path, the volume is intentionally metadata-only; use the [temporary OAuth seed workflow](../operations/deployment.md#seed-a-locked-down-azure-external-volume) to place demo files and then restore lockdown.
+Each guide builds one network path by hand in the Azure portal and the
+Databricks account console.
 
-Resource names derive from the environment file name (the deployment ID) when `name_prefix` and `workspace_name` are not set.
+## Workspace access
+
+- [Front-end Private Link](front-end-private-link.md): reach the workspace UI
+  and API through private endpoints.
+
+## Serverless compute to data sources
+
+- [Azure SQL Database with Private Link](serverless/sql-database/private-link.md)
+- [SQL Server on a VM with a private network gateway](manual/serverless-sql-server-vm-private-network-gateway.md)
+- [SQL Server on a VM with Private Link and a load balancer](manual/serverless-sql-server-vm-private-link.md)
+
+The [comparison](manual/README.md#which-path-to-choose) explains when to use
+the gateway and when to use Private Link.
+
+## Classic compute
+
+Classic compute runs in the workspace VNet. It reaches a source in another
+VNet through VNet peering, with the source's private DNS zone linked to the
+workspace VNet. The serverless paths in the guides above do not serve
+classic compute.
+
+To deploy the same scenarios as labs, see
+[Lab scenarios](../operations/lab-scenarios.md#azure).

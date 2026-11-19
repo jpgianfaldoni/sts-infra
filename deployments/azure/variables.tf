@@ -215,6 +215,9 @@ variable "workspace_network" {
     test_vm_subnet_cidr          = optional(string, "10.70.4.0/27")
     dns_subnet_cidr              = optional(string, "10.70.3.0/27")
     dns_server_ip                = optional(string, "10.70.3.4")
+    # Dedicated subnet delegated to the serverless private network gateway;
+    # created only when a source uses that mode. /28 or larger.
+    gateway_subnet_cidr = optional(string, "10.70.5.0/28")
   })
   default = { vnet_cidr = "10.70.0.0/16"
     host_subnet_cidr             = "10.70.0.0/24"
@@ -223,6 +226,12 @@ variable "workspace_network" {
     test_vm_subnet_cidr          = "10.70.4.0/27"
     dns_subnet_cidr              = "10.70.3.0/27"
     dns_server_ip                = "10.70.3.4"
+    gateway_subnet_cidr          = "10.70.5.0/28"
+  }
+
+  validation {
+    condition     = can(cidrhost(var.workspace_network.gateway_subnet_cidr, 0)) && tonumber(split("/", var.workspace_network.gateway_subnet_cidr)[1]) <= 28
+    error_message = "workspace_network.gateway_subnet_cidr must be a valid CIDR of /28 or larger."
   }
 }
 variable "sql_database_network" {
@@ -345,7 +354,7 @@ variable "key_vault" {
   }
 }
 variable "connectivity" {
-  description = "Serverless connectivity for Azure data sources. private_link creates an NCC private endpoint rule; approve it with ./infra endpoints azure."
+  description = "Serverless connectivity for Azure data sources. private_link creates an NCC private endpoint rule; approve it with ./infra endpoints azure. private_network_gateway routes the source's hostname through a Databricks private network gateway in the workspace VNet and on through the source's VNet peering."
   type = object({
     sql_database = optional(object({
       serverless = optional(string, "none")
@@ -361,8 +370,8 @@ variable "connectivity" {
 
   validation {
     condition = alltrue([for mode in [var.connectivity.sql_database.serverless, var.connectivity.mysql_flexible_server.serverless, var.connectivity.sql_server_vm.serverless] :
-    contains(["none", "private_link"], mode)])
-    error_message = "Serverless connectivity modes must be none or private_link."
+    contains(["none", "private_link", "private_network_gateway"], mode)])
+    error_message = "Serverless connectivity modes must be none, private_link, or private_network_gateway."
   }
 
   validation {
@@ -370,7 +379,7 @@ variable "connectivity" {
       var.connectivity.mysql_flexible_server.serverless == "none" ||
       (var.features.workspace && var.features.mysql_flexible_server && var.databricks_account_id != null)
     )
-    error_message = "connectivity.mysql_flexible_server.serverless = \"private_link\" requires features.workspace, features.mysql_flexible_server, and databricks_account_id."
+    error_message = "A serverless path to mysql_flexible_server requires features.workspace, features.mysql_flexible_server, and databricks_account_id."
   }
 
   validation {
@@ -378,7 +387,7 @@ variable "connectivity" {
       var.connectivity.sql_database.serverless == "none" ||
       (var.features.workspace && var.features.sql_database && var.databricks_account_id != null)
     )
-    error_message = "connectivity.sql_database.serverless = \"private_link\" requires features.workspace, features.sql_database, and databricks_account_id."
+    error_message = "A serverless path to sql_database requires features.workspace, features.sql_database, and databricks_account_id."
   }
 
   validation {
@@ -386,7 +395,7 @@ variable "connectivity" {
       var.connectivity.sql_server_vm.serverless == "none" ||
       (var.features.workspace && var.features.sql_server_vm && var.databricks_account_id != null && var.sql_server_vm.private_dns_name != null)
     )
-    error_message = "SQL Server VM serverless Private Link requires features.workspace, features.sql_server_vm, databricks_account_id, and sql_server_vm.private_dns_name."
+    error_message = "A serverless path to sql_server_vm requires features.workspace, features.sql_server_vm, databricks_account_id, and sql_server_vm.private_dns_name."
   }
 
   validation {
@@ -396,9 +405,46 @@ variable "connectivity" {
     )
     error_message = "Serverless Private Link does not support private-use TLDs such as .internal, .localhost, or .test; use a hostname such as sqlserver.lab.exampledomain.com."
   }
+
+  # The gateway only brings serverless compute into the workspace VNet; the
+  # source's peering and linked private DNS zone carry it the rest of the way.
+  validation {
+    condition = alltrue([
+      var.connectivity.sql_server_vm.serverless != "private_network_gateway" || var.sql_server_vm.workspace_peering_enabled,
+      var.connectivity.sql_database.serverless != "private_network_gateway" || var.sql_database.workspace_peering_enabled,
+      var.connectivity.mysql_flexible_server.serverless != "private_network_gateway" || var.mysql_flexible_server.workspace_peering_enabled,
+    ])
+    error_message = "serverless = \"private_network_gateway\" requires the source's workspace_peering_enabled = true: the gateway enters the workspace VNet and reaches the source through that peering."
+  }
+}
+variable "private_network_gateway" {
+  description = "Databricks private network gateway (Public Preview) for sources whose serverless mode is private_network_gateway. Its subnet is workspace_network.gateway_subnet_cidr."
+  type = object({
+    # Provisioned bandwidth in Gbps: 10, 30, 50, or 100. Billed per tier.
+    bandwidth_tier_gbps = optional(number, 10)
+    # Up to two DNS resolver IPs reachable from the gateway subnet. Empty uses
+    # Azure-provided DNS, which resolves the private DNS zones linked to the
+    # workspace VNet.
+    private_dns_resolvers = optional(list(string), [])
+    # Practice mode: Terraform creates only the delegated subnet and the source
+    # firewall rule. You create the NCC, attach it to the workspace, and create
+    # the gateway yourself; ./infra verify then checks your work.
+    manual = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition     = contains([10, 30, 50, 100], var.private_network_gateway.bandwidth_tier_gbps)
+    error_message = "private_network_gateway.bandwidth_tier_gbps must be 10, 30, 50, or 100."
+  }
+
+  validation {
+    condition     = length(var.private_network_gateway.private_dns_resolvers) <= 2
+    error_message = "private_network_gateway.private_dns_resolvers accepts at most two IP addresses."
+  }
 }
 variable "existing_network_connectivity_config_id" {
-  description = "Optional existing Databricks NCC ID to reuse for serverless private endpoint rules."
+  description = "Optional existing Databricks NCC ID to reuse for serverless private endpoint rules and the private network gateway."
   type        = string
   default     = null
   nullable    = true

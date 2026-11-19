@@ -105,5 +105,5 @@ module "lab_check" {
   # The module's data sources call the workspace API, so they wait for the
   # workspace (deferred to apply time when it is new), and the Key
   # Vault-backed scope must exist before a run reads it.
-  depends_on = [module.workspace, module.key_vault, module.sql_server_vm_workspace_peering, module.sql_server_vm_private_link_service]
+  depends_on = [module.workspace, module.key_vault, module.sql_server_vm_workspace_peering, module.sql_server_vm_private_link_service, module.private_network_gateway]
 }

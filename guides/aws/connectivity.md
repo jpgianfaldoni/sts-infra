@@ -1,139 +1,75 @@
 # AWS connectivity choices
 
-Every enabled service is deployed in its own VPC. Deploying a service does not automatically make it reachable from Databricks. The `classic` and `serverless` settings select connectivity independently for each service.
+A database or service in its own VPC is not reachable from Databricks until
+you build a network path to it. The right path depends on which compute type
+needs to connect, because the two run in different networks.
 
-| Compute | Mode | Resources created |
+| Compute | Where it runs | What a private path needs |
 | --- | --- | --- |
-| Classic | `none` | No connection between the workspace VPC and service VPC |
-| Classic | `peering` | VPC peering, routes, and port-specific security group rules |
-| Classic | `private_link` | Service NLB and endpoint service, plus an interface endpoint in the workspace VPC |
-| Serverless | `none` | No NCC private endpoint rule |
-| Serverless | `private_link` | Service NLB and endpoint service, plus an NCC, workspace binding, and private endpoint rule |
-| Classic to simulated on-premises | `none` | Private test VPC and EC2 host with no workspace route |
-| Classic to simulated on-premises | `transit_gateway` | TGW hub, two VPC attachments, reciprocal routes, and a TCP 8080 security path |
+| Classic | The workspace VPC in your AWS account | A route or an endpoint from the workspace VPC to the service |
+| Serverless | A Databricks-managed network | A Network Connectivity Configuration (NCC) with a private endpoint rule to an endpoint service you publish |
 
-NCC is derived automatically: Terraform creates one NCC when at least one service uses `serverless = "private_link"`. All serverless PrivateLink rules are placed in that NCC because a workspace can be bound to only one NCC.
+A path built for one compute type does nothing for the other. To serve both,
+build one of each.
 
-## Configuration
+## Options for classic compute
 
-Configure each enabled service with this shape:
+| Option | How it works | Choose it when | Guide |
+| --- | --- | --- | --- |
+| VPC peering | A direct route between the workspace VPC and the service VPC | Two VPCs with non-overlapping address ranges, and you want the simplest path | [VPC peering](classic/aurora-postgres/vpc-peering.md) |
+| PrivateLink | A Network Load Balancer and endpoint service in the service VPC, and an interface endpoint in the workspace VPC | Address ranges overlap, or the service owner must expose one port and nothing else | [PrivateLink](classic/aurora-postgres/private-link.md) |
+| Transit Gateway | A routing hub that both VPCs attach to | Many VPCs, or on-premises networks behind a VPN or Direct Connect | [Transit Gateway](classic/aurora-postgres/transit-gateway.md) |
 
-```hcl
-connectivity = {
-  rds_postgres = {
-    classic    = "peering"
-    serverless = "private_link"
-  }
-}
-```
+The three guides use Aurora PostgreSQL as the target. The network steps are
+the same for any TCP service; change the port and the target address.
 
-This example gives classic clusters a peered path while serverless compute uses NCC and PrivateLink. Other useful combinations are:
+## Option for serverless compute
 
-```hcl
-# Workspace and RDS in different VPCs, intentionally disconnected.
-rds_postgres = {
-  classic    = "none"
-  serverless = "none"
-}
+Serverless compute has one private option: PrivateLink through an NCC.
 
-# Classic clusters only, through VPC peering.
-rds_postgres = {
-  classic    = "peering"
-  serverless = "none"
-}
+1. Put a Network Load Balancer in front of the service and publish it as a
+   VPC endpoint service.
+2. Add a private endpoint rule for that service to an NCC, and attach the NCC
+   to the workspace.
+3. Accept the endpoint connection that Databricks requests.
 
-# Classic clusters only, through NLB and PrivateLink.
-rds_postgres = {
-  classic    = "private_link"
-  serverless = "none"
-}
+Guides: [RDS SQL Server](serverless/rds-sql-server/private-link.md) and
+[RabbitMQ on EC2](serverless/rabbitmq/private-link.md). A workspace uses one
+NCC, so every serverless destination of that workspace goes on the same NCC.
 
-# Serverless only, through NCC, NLB, and PrivateLink.
-rds_postgres = {
-  classic    = "none"
-  serverless = "private_link"
-}
+## Hostnames and TLS
 
-# Both compute types use the same NLB endpoint service through separate consumers.
-rds_postgres = {
-  classic    = "private_link"
-  serverless = "private_link"
-}
-```
+Which hostname the client uses depends on the path.
 
-The same shape applies to `rds_sql_server`, `aurora_postgres`, `rabbitmq`, and
-`kafka`. Classic supports `none`, `peering`, and `private_link`; serverless
-supports `none` and `private_link`. Kafka uses separate advertised listener
-ports for direct peering (`9092`) and PrivateLink (`9094`) so broker metadata
-always returns an address reachable through the selected path. See the
-[Kafka streaming guide](kafka/overview.md).
+| Path | Hostname to connect to |
+| --- | --- |
+| VPC peering or Transit Gateway | The service's own hostname. Enable DNS resolution across the peering so that it resolves to private addresses. |
+| Classic PrivateLink | The interface endpoint's DNS name. An endpoint service you own cannot enable private DNS for an AWS-owned name such as an RDS hostname. |
+| Serverless PrivateLink | The service's own hostname, listed as a domain name on the NCC rule. |
 
-The simulated on-premises feature has a classic-only setting:
-
-```hcl
-connectivity = {
-  simulated_on_prem = {
-    classic = "transit_gateway" # or "none"
-  }
-}
-```
-
-Transit Gateway models a routed hybrid hub. The simulated VPC is still an AWS
-VPC rather than a literal data center, so this option does not create a VPN,
-Direct Connect gateway, or BGP session. See the [simulated on-premises
-guide](classic/simulated-on-prem/overview.md).
-
-## Connection endpoints
-
-After apply, inspect the non-sensitive connection map:
-
-```bash
-./infra output aws environments/local/my-aws.tfvars
-```
-
-The `connectivity` output reports each selected mode and its client-facing host. Peering uses the service's original hostname. Classic PrivateLink uses the interface endpoint DNS name because customer endpoint services cannot enable private DNS for AWS-owned RDS hostnames. If the client verifies TLS hostnames, configure the driver so the original service hostname remains the TLS server name while the interface endpoint DNS name is used for the network connection.
-
-Serverless PrivateLink continues to use the original service hostname listed in the NCC rule.
+With classic PrivateLink, a client that verifies the server certificate sees a
+name mismatch, because it connected to the endpoint name. Configure the driver
+to connect to the endpoint name while it validates the certificate against
+the service's own hostname.
 
 ## Endpoint acceptance
 
-Endpoint services require acceptance. Classic interface endpoints are created
-by the same Terraform configuration in the same AWS account, so Terraform
-accepts their connections automatically (`aws_vpc_endpoint_connection_accepter`
-in the `classic-private-link` module). Serverless NCC endpoints are
-cross-account and remain unusable until the expected Databricks-created
-endpoint is accepted. With `endpoint_approval = "auto"` (the default),
-`./infra apply` accepts exactly the connections the deployment requested. With
-`endpoint_approval = "manual"`, list the connections that still need a
-decision with:
+An endpoint service that requires acceptance does not carry traffic until its
+owner accepts each connection.
 
-```bash
-./infra endpoints aws status environments/local/my-aws.tfvars
-```
+- **Classic interface endpoints** are in your own account. Accept them under
+  **VPC > Endpoint services > Endpoint connections**.
+- **Serverless NCC endpoints** come from a Databricks account. Before you
+  accept one, check that its endpoint ID matches the one shown on the NCC
+  rule, so that you accept the request your NCC made and no other.
 
-Each `pending_endpoint_acceptances` entry contains the `service_id` and
-`endpoint_id` to review. After reviewing them, accept only the expected
-connection:
+AWS does not delete an endpoint service while a consumer endpoint is still
+connected. To remove a path, reject or delete the endpoint connections first,
+and delete the NCC rule in Databricks.
 
-```bash
-./infra endpoints aws accept environments/local/my-aws.tfvars \
-  --service-id vpce-svc-... \
-  --endpoint-id vpce-...
-```
+## Moving targets
 
-Acceptance changes external state and is not performed by validation or planning.
-
-AWS will not delete an endpoint service while an active consumer endpoint
-remains. With `endpoint_approval = "auto"`, the confirmed `./infra destroy`
-rejects the serverless connections on the deployment's endpoint services
-before Terraform runs. Otherwise reject them yourself first:
-
-```bash
-./infra endpoints aws reject environments/local/my-aws.tfvars \
-  --service-id vpce-svc-... \
-  --endpoint-id vpce-... \
-  --confirm reject-aws-endpoint
-```
-
-Review the IDs with `endpoints aws status` first. Rejection is an explicit
-external state change and disconnects serverless traffic immediately.
+A Network Load Balancer forwards to IP addresses, and the private IP of a
+managed database can change during failover, maintenance, or replacement. For
+anything longer-lived than a test, automate the update of the target group
+from the database's DNS name. The PrivateLink guides describe this limitation.
