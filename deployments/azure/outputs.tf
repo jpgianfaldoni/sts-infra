@@ -149,15 +149,18 @@ output "key_vault" {
 }
 output "serverless_connectivity" {
   description = "NCC used for serverless paths, with one entry per private endpoint rule and the private network gateway when a source uses it."
-  value = local.serverless_ncc_enabled ? {
+  value = local.serverless_ncc_enabled || local.private_network_gateway_enabled ? {
     network_connectivity_config_id = try(module.ncc[0].network_connectivity_config_id, null)
     rules                          = try(module.ncc[0].rules, {})
     private_network_gateway = local.private_network_gateway_enabled ? {
+      # manual: name and state are null because you create the gateway; the
+      # subnet and destinations are the values to enter.
+      manual       = var.private_network_gateway.manual
       name         = try(module.private_network_gateway[0].name, null)
       state        = try(module.private_network_gateway[0].state, null)
       subnet_id    = try(module.workspace_network[0].gateway_subnet_id, null)
       subnet_cidr  = var.workspace_network.gateway_subnet_cidr
-      destinations = try(module.private_network_gateway[0].destinations, [])
+      destinations = local.private_network_gateway_destinations
     } : null
   } : null
 }

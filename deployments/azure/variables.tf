@@ -426,6 +426,10 @@ variable "private_network_gateway" {
     # Azure-provided DNS, which resolves the private DNS zones linked to the
     # workspace VNet.
     private_dns_resolvers = optional(list(string), [])
+    # Practice mode: Terraform creates only the delegated subnet and the source
+    # firewall rule. You create the NCC, attach it to the workspace, and create
+    # the gateway yourself; ./infra verify then checks your work.
+    manual = optional(bool, false)
   })
   default = {}
 

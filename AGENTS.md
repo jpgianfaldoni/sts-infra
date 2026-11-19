@@ -54,7 +54,7 @@ Clarify these phrasings instead of guessing:
   the source's `workspace_peering_enabled = true`. Say that classic compute
   does not use the gateway: it already runs in the workspace VNet and reaches
   the source through the same peering. The gateway has no endpoint to approve.
-  See `guides/azure/serverless/private-network-gateway.md`.
+  See `guides/operations/lab-scenarios.md#private-network-gateway`.
 - MySQL: RDS for MySQL (`rds_mysql`) on AWS; Azure Database for MySQL Flexible
   Server (`mysql_flexible_server`) or MySQL on a VM (`mysql_vm`) on Azure.
 - Oracle: RDS for Oracle (`rds_oracle`, non-multitenant Standard Edition 2) on

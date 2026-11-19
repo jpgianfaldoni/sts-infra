@@ -124,7 +124,7 @@ Set both paths to `none` for a lab where you build the connection yourself.
 
 On Azure, classic compute uses VNet peering (`<source>.workspace_peering_enabled`)
 and serverless compute uses `private_link` or `private_network_gateway`. The
-[private network gateway](guides/azure/serverless/private-network-gateway.md)
+[private network gateway](guides/operations/lab-scenarios.md#private-network-gateway)
 brings serverless compute into the workspace VNet, where it follows the same
 peering as classic compute.
 
@@ -272,6 +272,8 @@ paths, build time, and cost.
 
 - [Guides index](guides/README.md): networking concepts and step-by-step
   tutorials for each path.
+- [Lab scenarios](guides/operations/lab-scenarios.md): what each scenario
+  builds and the settings that select each network path.
 - [Deployment workflow](guides/operations/deployment.md): metastore selection,
   seeding locked-down Azure storage, and the destroy checklist.
 - [Authentication](guides/operations/authentication.md): profiles, overrides,

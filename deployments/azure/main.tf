@@ -412,8 +412,11 @@ locals {
   }
   serverless_private_link_enabled = contains(values(local.serverless_modes), "private_link")
   private_network_gateway_enabled = contains(values(local.serverless_modes), "private_network_gateway")
+  # manual keeps the delegated subnet and the source firewall rule but leaves
+  # the NCC, its workspace attachment, and the gateway for the user to create.
+  private_network_gateway_managed = local.private_network_gateway_enabled && !var.private_network_gateway.manual
   # Private endpoint rules and the gateway share one NCC.
-  serverless_ncc_enabled = local.serverless_private_link_enabled || local.private_network_gateway_enabled
+  serverless_ncc_enabled = local.serverless_private_link_enabled || local.private_network_gateway_managed
   network_connectivity_config_id = !local.serverless_ncc_enabled ? null : (
     var.existing_network_connectivity_config_id != null
     ? var.existing_network_connectivity_config_id
@@ -462,7 +465,7 @@ locals {
 }
 
 module "private_network_gateway" {
-  count  = local.private_network_gateway_enabled ? 1 : 0
+  count  = local.private_network_gateway_managed ? 1 : 0
   source = "../../modules/azure/private-network-gateway"
   providers = {
     databricks.account = databricks.account

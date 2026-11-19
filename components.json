@@ -1005,6 +1005,12 @@
               "type": "list(string)",
               "default": [],
               "description": "Up to two DNS resolver IPs reachable from the gateway subnet. Empty uses Azure-provided DNS, which resolves the private DNS zones linked to the workspace VNet."
+            },
+            "manual": {
+              "path": "private_network_gateway.manual",
+              "type": "bool",
+              "default": false,
+              "description": "Practice mode: create only the delegated subnet and the source firewall rule, and leave the NCC, its workspace attachment, and the gateway for the user to create by hand. ./infra verify then checks the serverless path."
             }
           },
           "minutes": 15,

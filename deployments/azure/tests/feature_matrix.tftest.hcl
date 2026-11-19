@@ -1455,3 +1455,43 @@ run "warn_private_network_gateway_outside_preview_regions" {
 
   expect_failures = [check.private_network_gateway_region]
 }
+
+run "manual_private_network_gateway_keeps_only_the_subnet_and_checks" {
+  command = plan
+
+  variables {
+    subscription_id       = "00000000-0000-0000-0000-000000000000"
+    databricks_account_id = "00000000-0000-0000-0000-000000000000"
+    features = {
+      workspace     = true
+      sql_server_vm = true
+    }
+    sql_server_vm = {
+      workspace_peering_enabled = true
+      private_dns_name          = "sqlserver.lab.exampledomain.com"
+    }
+    connectivity = {
+      sql_server_vm = {
+        serverless = "private_network_gateway"
+      }
+    }
+    private_network_gateway = {
+      manual = true
+    }
+  }
+
+  assert {
+    condition     = length(module.private_network_gateway) == 0 && length(module.ncc) == 0 && length(module.network_connectivity_config) == 0
+    error_message = "Manual mode must leave the NCC, its binding, and the gateway to the user."
+  }
+
+  assert {
+    condition     = output.serverless_connectivity.private_network_gateway.manual && output.serverless_connectivity.private_network_gateway.subnet_cidr == "10.70.5.0/28"
+    error_message = "Manual mode must still create and report the delegated gateway subnet."
+  }
+
+  assert {
+    condition     = output.lab_check.checks.sql_server_vm_serverless.mode == "private_network_gateway"
+    error_message = "Manual mode must keep the serverless check so verify tests the hand-built gateway."
+  }
+}

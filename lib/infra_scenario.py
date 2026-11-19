@@ -592,7 +592,13 @@ def derived_components(cloud, config, paths):
         if enabled(config, "workspace") and any(mode == "private_network_gateway" for (_, compute), mode in active.items() if compute == "serverless"):
             derived.add("private_network_gateway")
     # Private endpoint rules and the private network gateway live on one NCC.
-    if enabled(config, "workspace") and any(mode in ("private_link", "private_network_gateway") for (_, compute), mode in active.items() if compute == "serverless"):
+    # In manual mode the user creates the NCC and the gateway.
+    if config.get("private_network_gateway", {}).get("manual"):
+        derived.discard("private_network_gateway")
+    if enabled(config, "workspace") and (
+        "private_network_gateway" in derived
+        or any(mode == "private_link" for (_, compute), mode in active.items() if compute == "serverless")
+    ):
         derived.add("ncc")
     if enabled(config, "workspace") and config.get("lab_check", {}).get("enabled", True) and any(
         mode != "none" for mode in active.values()
@@ -657,6 +663,12 @@ def analyze(cloud, config, manifest, explicit=None, target_name=None, target=Non
                                  "the gateway brings serverless compute into the workspace VNet, and the peering carries it to the source.")
             if source == "sql_server_vm" and not config.get(source, {}).get("private_dns_name"):
                 finding("error", "sql_server_vm.private_dns_name is required for the private network gateway, which routes by DNS name.")
+        if config.get("private_network_gateway", {}).get("manual") and any(
+            path["compute"] == "serverless" and path["mode"] == "private_network_gateway" for path in paths
+        ):
+            finding("info", "private_network_gateway.manual = true: Terraform creates only the delegated gateway subnet and the source "
+                            "firewall rule. Create the NCC, attach it to the workspace, and create the gateway yourself; "
+                            "./infra verify fails on the serverless path until you do.")
         if "private_network_gateway" in derived:
             finding("info", "The private network gateway is in Public Preview and serves serverless compute only; classic compute "
                             "already runs in the workspace VNet and uses the same peering. Databricks bills the gateway by bandwidth tier.")
